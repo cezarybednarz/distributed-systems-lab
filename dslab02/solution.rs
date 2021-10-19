@@ -5,19 +5,30 @@ use std::sync::atomic::AtomicBool;
 type Task = Box<dyn FnOnce() + Send>;
 
 struct Worker {
-    join_handle: JoinHandle<()>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(receiver: Arc<Mutex<mpsc::Receiver<Task>>>) -> Worker {
+    fn new(receiver: Arc<Mutex<mpsc::Receiver<Task>>>, pool_finished: Arc<AtomicBool>) -> Worker {
         let handle = std::thread::spawn(move || loop {
             let res = receiver.lock().unwrap().recv().unwrap();
-            println!("dostałem joba!!!");
+            let is_finished = pool_finished.load(std::sync::atomic::Ordering::Relaxed);
+            if is_finished {
+                println!("worker konczy!");
+                break;
+            } else {
+                res();
+            }
             // todo sprawdzić tego unwrapa
-            res();
         });
         Worker {
-            join_handle: handle
+            join_handle: Some(handle)
+        }
+    }
+
+    fn drop(&mut self) {
+        if let Some(handle) = self.join_handle.take() {
+            handle.join().expect("failed to join thread");
         }
     }
 }
@@ -26,7 +37,7 @@ impl Worker {
 pub struct Threadpool {
     worker_threads: Vec<Worker>,
     sender: mpsc::Sender<Task>,
-    finished: AtomicBool,
+    pool_finished: Arc<AtomicBool>,
 }
 
 impl Threadpool {
@@ -35,15 +46,16 @@ impl Threadpool {
         let (init_sender, r) = mpsc::channel();
         let init_receiver = Arc::new(Mutex::new(r));
         let mut init_workers = Vec::new();
+        let init_pool_finished = Arc::new(AtomicBool::new(false));
 
         for _ in 0..workers_count {
-            init_workers.push(Worker::new(Arc::clone(&init_receiver)));
+            init_workers.push(Worker::new(Arc::clone(&init_receiver), Arc::clone(&init_pool_finished)));
         }
         
         Threadpool {
             worker_threads: init_workers,
             sender: init_sender,
-            finished: AtomicBool::new(false)
+            pool_finished: init_pool_finished
         }
     }
 
@@ -59,7 +71,9 @@ impl Drop for Threadpool {
     /// It waits until all submitted tasks are executed,
     /// and until all threads are joined.
     fn drop(&mut self) {
-        // todo joiny
-        self.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        for worker in self.worker_threads.iter_mut() {
+            worker.drop();
+        }
+        self.pool_finished.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
