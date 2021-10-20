@@ -1,1 +1,0 @@
-/home/cezary/Studia/DS/distributed-systems-lab/dslab02/target/debug/lab02: /home/cezary/Studia/DS/distributed-systems-lab/dslab02/main.rs /home/cezary/Studia/DS/distributed-systems-lab/dslab02/public_test.rs /home/cezary/Studia/DS/distributed-systems-lab/dslab02/solution.rs
