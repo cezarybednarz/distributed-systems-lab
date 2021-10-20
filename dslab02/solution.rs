@@ -36,7 +36,7 @@ impl Worker {
 /// The thread pool.
 pub struct Threadpool {
     worker_threads: Vec<Worker>,
-    sender: mpsc::Sender<Task>,
+    sender: Arc<Mutex<mpsc::Sender<Task>>>,
 }
 
 impl Threadpool {
@@ -52,13 +52,13 @@ impl Threadpool {
         
         Threadpool {
             worker_threads: init_workers,
-            sender: init_sender,
+            sender: Arc::new(Mutex::new(init_sender)),
         }
     }
 
     /// Submit a new task.
     pub fn submit(&self, task: Task) {
-        self.sender.send(Box::new(task)).expect("Thread should finish")
+        self.sender.lock().unwrap().send(Box::new(task)).expect("Thread should finish")
     }
 }
 
@@ -69,7 +69,7 @@ impl Drop for Threadpool {
     /// and until all threads are joined.
     fn drop(&mut self) {
         let (s, _) = std::sync::mpsc::channel();
-        drop(std::mem::replace(&mut self.sender, s));
+        drop(std::mem::replace(&mut self.sender, Arc::new(Mutex::new(s))));
         for worker in self.worker_threads.iter_mut() {
             worker.drop();
         }
