@@ -32,16 +32,16 @@ impl FibonacciModule {
         // For the sake of simplicity, generate a random number and use it
         // as the module's identifier:
         let id = rand::thread_rng().gen();
-        
+
         queue.send(FibonacciSystemMessage::RegisterModule(
             FibonacciModule { 
                 num: initial_number, 
                 limit, 
                 id, 
                 other: None, 
-                queue,
+                queue: queue.clone(),
             }
-        ));
+        )).unwrap();
 
         id
     }
@@ -52,7 +52,7 @@ impl FibonacciModule {
     pub(crate) fn message(&mut self, idx: usize, num: Num) {
         if idx >= self.limit {
             // The calculation is done.
-            self.queue.send(FibonacciSystemMessage::Done);
+            self.queue.send(FibonacciSystemMessage::Done).unwrap();
             return;
         }
         
@@ -65,7 +65,7 @@ impl FibonacciModule {
             id: self.other.unwrap(),
             idx: idx + 1,
             num: self.num,
-        });
+        }).unwrap();
     }
 
     /// Handle the init-message.
@@ -79,7 +79,7 @@ impl FibonacciModule {
                 id: other,
                 idx: 1,
                 num: 1
-            });
+            }).unwrap();
         }
     }
 }
