@@ -1,4 +1,4 @@
-use std::{rc::Rc, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use async_channel::{Receiver, Sender, unbounded};
 use tokio::time;
@@ -44,12 +44,23 @@ impl System {
         &mut self,
         requester: &ModuleRef<T>,
         delay: Duration,
-    ) {
-        let mut interval_delay = time::interval(delay);
-        while !requester.shutdown.load(Ordering::Relaxed) { 
-            requester.message_tx.send(Box::new(Tick{})).await.unwrap();
+    ) { 
+        let requester_clone = requester.clone();
+        let _task_handle = tokio::spawn( async move {
+            let mut interval_delay = time::interval(delay);
             interval_delay.tick().await;
-        }    
+            while !requester_clone.shutdown.load(Ordering::Relaxed) { 
+                match requester_clone.message_tx.try_send(Box::new(Tick{})) {
+                    Ok(()) => {
+                        interval_delay.tick().await;
+                    }
+                    _ => {
+                        break;
+                    }
+                }
+                
+            }
+        });
     }
 
     /// Registers the module in the system.
@@ -66,7 +77,7 @@ impl System {
         let shutdown_clone = shutdown.clone();
 
         let module_handle = tokio::spawn(async move {
-            println!("dzien dobry!!!!!!");
+            println!("starting module");
             let mut mut_mod = module;
             loop {
                 match shutdown.load(Ordering::Relaxed) {
@@ -82,8 +93,8 @@ impl System {
             }
             println!("exiting module...");
         });
-
         self.module_refs.push((module_handle, shutdown_clone, Box::new(message_rx_clone)));
+        println!("finishing module creation");
         module_ref
     }
 
@@ -96,6 +107,7 @@ impl System {
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
+        println!("shutting down!!!!!!!!!!!!!!!!!!!!!");
         for (_, shutdown, _) in self.module_refs.iter_mut() {
             shutdown.store(true, Ordering::Relaxed);
         }
@@ -105,6 +117,8 @@ impl System {
         for (module_handle, _, _) in self.module_refs.iter_mut() {
             let _ = module_handle.await;
         }
+        // after shutdown system is in the beginning state
+        self.module_refs = Vec::new();
     }
 }
 
