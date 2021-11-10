@@ -51,7 +51,7 @@ impl System {
             loop {
                 match shutdown_rx.try_recv() {
                     Err(_) => {
-                        let msg = message_rx.recv().await.unwrap().get_handled(&mut mut_mod);
+                        message_rx.recv().await.unwrap().get_handled(&mut mut_mod).await;
                     }
                     Ok(_) => break,
                 }
@@ -72,8 +72,8 @@ impl System {
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
         for (module_handle, shutdown_tx) in self.module_refs.iter_mut() {
-            module_handle.await;
-            shutdown_tx.send(());
+            module_handle.await.unwrap();
+            shutdown_tx.send(()).await.unwrap();
         }
     }
 }
@@ -111,7 +111,7 @@ impl<T: Send> ModuleRef<T> {
     where
         T: Handler<M>,
     {
-        self.message_tx.send(Box::new(msg));
+        self.message_tx.send(Box::new(msg)).await.unwrap();
     }
 }
 
