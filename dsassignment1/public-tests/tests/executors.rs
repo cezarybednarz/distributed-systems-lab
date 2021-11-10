@@ -74,11 +74,11 @@ async fn initialize_system(sys: &mut System) -> Receiver<String> {
         })
         .await;
 
-    ping.send(Init {
-        target: pong.clone(),
+    pong.send(Init {
+        target: ping.clone(),
     })
     .await;
-    pong.send(Init { target: ping }).await;
+    ping.send(Init { target: pong }).await;
     log_receiver
 }
 

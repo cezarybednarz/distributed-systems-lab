@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
+use tokio::task::JoinHandle;
+use async_channel::{Receiver, Sender, unbounded};
 
 pub trait Message: Send + 'static {}
 impl<T: Send + 'static> Message for T {}
@@ -18,7 +20,10 @@ where
 pub struct Tick {}
 
 // You can add fields to this struct.
-pub struct System {}
+pub struct System {
+    // handle of the tokio task and sender for shutdown messages
+    module_refs: Vec<(JoinHandle<()>, Sender<()>)>,
+}
 
 impl System {
     /// Schedules a `Tick` message to be sent to the given module periodically
@@ -34,26 +39,70 @@ impl System {
     /// Registers the module in the system.
     /// Returns a `ModuleRef`, which can be used then to send messages to the module.
     pub async fn register_module<T: Send + 'static>(&mut self, module: T) -> ModuleRef<T> {
-        unimplemented!()
+        let (shutdown_tx, shutdown_rx) = unbounded();
+        let (message_tx, message_rx) = unbounded();
+        let module_ref = ModuleRef {
+            message_tx,
+            shutdown_rx: shutdown_rx.clone(),
+        };
+
+        let module_handle = tokio::spawn(async move {
+            let mut mut_mod = module;
+            loop {
+                match shutdown_rx.try_recv() {
+                    Err(_) => {
+                        let msg = message_rx.recv().await.unwrap().get_handled(&mut mut_mod);
+                    }
+                    Ok(_) => break,
+                }
+            }
+        });
+
+        self.module_refs.push((module_handle, shutdown_tx));
+        module_ref
     }
 
     /// Creates and starts a new instance of the system.
     pub async fn new() -> Self {
-        unimplemented!()
+        System {
+            module_refs: Vec::new(),
+        }
     }
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        unimplemented!()
+        for (module_handle, shutdown_tx) in self.module_refs.iter_mut() {
+            module_handle.await;
+            shutdown_tx.send(());
+        }
+    }
+}
+
+// trait mentioned in task's hint
+#[async_trait::async_trait]
+trait Handlee<T>: Send + 'static
+where
+    T: Send,
+{
+    async fn get_handled(self: Box<Self>, module: &mut T);
+}
+
+#[async_trait::async_trait]
+impl<M, T> Handlee<T> for M
+where
+    T: Handler<M> + Send,
+    M: Message,
+{
+    async fn get_handled(self: Box<Self>, module: &mut T) {
+        module.handle(*self).await
     }
 }
 
 /// A reference to a module used for sending messages.
 // You can add fields to this struct.
 pub struct ModuleRef<T: Send + 'static> {
-    // A dummy marker to satisfy the compiler. It can be removed if type T is
-    // used in some other field.
-    pub(crate) mod_internal: std::marker::PhantomData<T>,
+    message_tx: Sender<Box<dyn Handlee<T>>>,
+    shutdown_rx: Receiver<()>,
 }
 
 impl<T: Send> ModuleRef<T> {
@@ -62,13 +111,13 @@ impl<T: Send> ModuleRef<T> {
     where
         T: Handler<M>,
     {
-        unimplemented!()
+        self.message_tx.send(Box::new(msg));
     }
 }
 
 impl<T: Send> Clone for ModuleRef<T> {
     /// Creates a new reference to the same module.
     fn clone(&self) -> Self {
-        unimplemented!()
+        ModuleRef { message_tx: self.message_tx.clone(), shutdown_rx: self.shutdown_rx.clone() }
     }
 }
