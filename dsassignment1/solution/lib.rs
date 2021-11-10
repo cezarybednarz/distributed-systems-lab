@@ -15,14 +15,23 @@ where
     async fn handle(&mut self, msg: M);
 }
 
+trait Closable {
+    fn rx_close(&self);
+}
+impl<T> Closable for Receiver<T> {
+    fn rx_close(&self) {
+        println!("closing receiver");
+        self.close();
+    }
+}
+
 /// The message sent as a result of calling `System::request_tick()`.
 #[derive(Debug, Clone)]
 pub struct Tick {}
 
-// You can add fields to this struct.
 pub struct System {
     // handle of the tokio task and sender for shutdown messages
-    module_refs: Vec<(JoinHandle<()>, Sender<()>)>,
+    module_refs: Vec<(JoinHandle<()>, Sender<()>, Box<dyn Closable>)>,
 }
 
 impl System {
@@ -46,19 +55,27 @@ impl System {
             shutdown_rx: shutdown_rx.clone(),
         };
 
+        let message_rx_clone = message_rx.clone();
+
         let module_handle = tokio::spawn(async move {
+            println!("dzien dobry!!!!!!");
             let mut mut_mod = module;
             loop {
                 match shutdown_rx.try_recv() {
                     Err(_) => {
+                        println!("receiving message");
                         message_rx.recv().await.unwrap().get_handled(&mut mut_mod).await;
                     }
-                    Ok(_) => break,
+                    Ok(_) => {
+                        println!("breaking...");
+                        break;
+                    }
                 }
             }
+            println!("exiting module...");
         });
 
-        self.module_refs.push((module_handle, shutdown_tx));
+        self.module_refs.push((module_handle, shutdown_tx, Box::new(message_rx_clone)));
         module_ref
     }
 
@@ -71,9 +88,14 @@ impl System {
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        for (module_handle, shutdown_tx) in self.module_refs.iter_mut() {
-            module_handle.await.unwrap();
+        for (_, shutdown_tx, _) in self.module_refs.iter_mut() {
             shutdown_tx.send(()).await.unwrap();
+        }
+        for (_, _, message_rx) in self.module_refs.iter_mut() {
+            message_rx.rx_close();
+        }
+        for (module_handle, _, _) in self.module_refs.iter_mut() {
+            let _ = module_handle.await;
         }
     }
 }
@@ -99,7 +121,6 @@ where
 }
 
 /// A reference to a module used for sending messages.
-// You can add fields to this struct.
 pub struct ModuleRef<T: Send + 'static> {
     message_tx: Sender<Box<dyn Handlee<T>>>,
     shutdown_rx: Receiver<()>,
