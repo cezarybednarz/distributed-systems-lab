@@ -1,6 +1,9 @@
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 use async_channel::{Receiver, Sender, unbounded};
+use tokio::time;
+use core::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 pub trait Message: Send + 'static {}
 impl<T: Send + 'static> Message for T {}
@@ -30,8 +33,8 @@ impl<T> Closable for Receiver<T> {
 pub struct Tick {}
 
 pub struct System {
-    // handle of the tokio task and sender for shutdown messages
-    module_refs: Vec<(JoinHandle<()>, Sender<()>, Box<dyn Closable>)>,
+    /// Handle of the tokio task, if module is shut down, receiver of module messages
+    module_refs: Vec<(JoinHandle<()>, Arc<AtomicBool>, Box<dyn Closable>)>,
 }
 
 impl System {
@@ -42,31 +45,36 @@ impl System {
         requester: &ModuleRef<T>,
         delay: Duration,
     ) {
-        unimplemented!()
+        let mut interval_delay = time::interval(delay);
+        while !requester.shutdown.load(Ordering::Relaxed) { 
+            requester.message_tx.send(Box::new(Tick{})).await.unwrap();
+            interval_delay.tick().await;
+        }    
     }
 
     /// Registers the module in the system.
     /// Returns a `ModuleRef`, which can be used then to send messages to the module.
     pub async fn register_module<T: Send + 'static>(&mut self, module: T) -> ModuleRef<T> {
-        let (shutdown_tx, shutdown_rx) = unbounded();
         let (message_tx, message_rx) = unbounded();
+        let shutdown = Arc::new(AtomicBool::new(false));
         let module_ref = ModuleRef {
             message_tx,
-            shutdown_rx: shutdown_rx.clone(),
+            shutdown: shutdown.clone(),
         };
 
         let message_rx_clone = message_rx.clone();
+        let shutdown_clone = shutdown.clone();
 
         let module_handle = tokio::spawn(async move {
             println!("dzien dobry!!!!!!");
             let mut mut_mod = module;
             loop {
-                match shutdown_rx.try_recv() {
-                    Err(_) => {
+                match shutdown.load(Ordering::Relaxed) {
+                    false => {
                         println!("receiving message");
                         message_rx.recv().await.unwrap().get_handled(&mut mut_mod).await;
                     }
-                    Ok(_) => {
+                    true => {
                         println!("breaking...");
                         break;
                     }
@@ -75,7 +83,7 @@ impl System {
             println!("exiting module...");
         });
 
-        self.module_refs.push((module_handle, shutdown_tx, Box::new(message_rx_clone)));
+        self.module_refs.push((module_handle, shutdown_clone, Box::new(message_rx_clone)));
         module_ref
     }
 
@@ -88,8 +96,8 @@ impl System {
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        for (_, shutdown_tx, _) in self.module_refs.iter_mut() {
-            shutdown_tx.send(()).await.unwrap();
+        for (_, shutdown, _) in self.module_refs.iter_mut() {
+            shutdown.store(true, Ordering::Relaxed);
         }
         for (_, _, message_rx) in self.module_refs.iter_mut() {
             message_rx.rx_close();
@@ -123,7 +131,7 @@ where
 /// A reference to a module used for sending messages.
 pub struct ModuleRef<T: Send + 'static> {
     message_tx: Sender<Box<dyn Handlee<T>>>,
-    shutdown_rx: Receiver<()>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl<T: Send> ModuleRef<T> {
@@ -139,6 +147,6 @@ impl<T: Send> ModuleRef<T> {
 impl<T: Send> Clone for ModuleRef<T> {
     /// Creates a new reference to the same module.
     fn clone(&self) -> Self {
-        ModuleRef { message_tx: self.message_tx.clone(), shutdown_rx: self.shutdown_rx.clone() }
+        ModuleRef { message_tx: self.message_tx.clone(), shutdown: self.shutdown.clone() }
     }
 }
