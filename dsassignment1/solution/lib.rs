@@ -23,7 +23,6 @@ trait Closable {
 }
 impl<T> Closable for Receiver<T> {
     fn rx_close(&self) {
-        println!("closing receiver");
         self.close();
     }
 }
@@ -77,24 +76,19 @@ impl System {
         let shutdown_clone = shutdown.clone();
 
         let module_handle = tokio::spawn(async move {
-            println!("starting module");
             let mut mut_mod = module;
             loop {
                 match shutdown.load(Ordering::Relaxed) {
                     false => {
-                        println!("receiving message");
                         message_rx.recv().await.unwrap().get_handled(&mut mut_mod).await;
                     }
                     true => {
-                        println!("breaking...");
                         break;
                     }
                 }
             }
-            println!("exiting module...");
         });
         self.module_refs.push((module_handle, shutdown_clone, Box::new(message_rx_clone)));
-        println!("finishing module creation");
         module_ref
     }
 
@@ -107,7 +101,6 @@ impl System {
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        println!("shutting down!!!!!!!!!!!!!!!!!!!!!");
         for (_, shutdown, _) in self.module_refs.iter_mut() {
             shutdown.store(true, Ordering::Relaxed);
         }
