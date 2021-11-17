@@ -61,7 +61,13 @@ impl StableStorage for Storage {
         let mut dst_dir = self.dst_path.clone();
         dst_dir.push(DST_DIR_NAME);
         
-        println!("{}\n{}\n{}\n", tmp_dir.display(), tmp_file.display(), self.dst_path.display());
+        // some files may be left in tmp
+        match fs::read_dir(tmp_dir.clone()).await {
+            Ok(_) => {
+                fs::remove_dir_all(tmp_dir.clone()).await.unwrap();
+            }
+            _ => {}
+        }
 
         fs::create_dir(tmp_dir.clone()).await.unwrap();
         let mut file = fs::File::create(tmp_file).await.unwrap();
