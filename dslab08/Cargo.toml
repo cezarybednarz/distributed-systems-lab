@@ -13,7 +13,7 @@ uuid = { version = "0.8", features = ["v4", "serde"] }
 async-trait = "0.1"
 log = "0.4"
 async-channel = "1.6"
-executor = { path = "../la1/solution/", package = "assignment-1-solution" }
+executor = { path = "../dsassignment1/solution/", package = "assignment-1-solution" }
 
 [[bin]]
 name = "lab08"
