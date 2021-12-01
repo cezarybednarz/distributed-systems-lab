@@ -76,9 +76,7 @@ impl Handler<DetectorOperationUdp> for FailureDetectorModule {
                     let msg = bincode::serialize(&DetectorOperation::AliveInfo(self.prev_alive.clone().into_iter().collect())).unwrap();
                     self.socket.send_to(&msg, sock_addr).await.unwrap();
                 }
-                _ => {
-                    println!("ERROR, prawdopodobnie potrzeba zaimplementować AliveResponse");
-                }
+                DetectorOperation::AliveInfo(_) => {}
             }
         }
     }
