@@ -19,7 +19,6 @@ pub struct FailureDetectorModule {
     ident: Uuid,
     alive: HashSet<Uuid>,
     prev_alive: HashSet<Uuid>,
-    suspected: HashSet<Uuid>,
     all_idents: HashSet<Uuid>,
     addresses: HashMap<Uuid, SocketAddr>,
     socket: Arc<UdpSocket>,
@@ -41,7 +40,6 @@ impl FailureDetectorModule {
                 enabled: true,
                 alive: all_idents.clone(),
                 prev_alive: all_idents.clone(),
-                suspected: HashSet::new(),
                 ident, 
                 all_idents: all_idents.clone(),
                 addresses: addresses.clone(),
@@ -87,17 +85,13 @@ impl Handler<DetectorOperationUdp> for FailureDetectorModule {
 impl Handler<Tick> for FailureDetectorModule {
     async fn handle(&mut self, _msg: Tick) {
         if self.enabled {
-            self.prev_alive = self.alive.clone();
             for p in self.all_idents.iter() {
-                if !self.alive.contains(&p) && !self.suspected.contains(&p) {
-                    self.suspected.insert(p.clone());
-                } else if self.alive.contains(&p) && self.suspected.contains(&p) {
-                    self.suspected.remove(&p);
-                }
                 let sock_addr = self.addresses.get(p).unwrap();
                 let msg = bincode::serialize(&DetectorOperation::HeartbeatRequest).unwrap();
                 self.socket.send_to(&msg, sock_addr).await.unwrap();
             }
+            self.prev_alive = self.alive.clone();
+            self.alive = HashSet::new();
         }
     }
 }

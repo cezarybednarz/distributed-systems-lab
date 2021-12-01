@@ -1,7 +1,7 @@
 mod public_test;
 mod solution;
 
-use crate::solution::{DetectorOperation, FailureDetectorModule};
+use crate::solution::{DetectorOperation, FailureDetectorModule, Disable};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
@@ -68,8 +68,10 @@ async fn main() {
     let alive_info =
         unwrap_alive_info(bincode::deserialize(&buf[..len]).expect("Invalid format of alive info!"));
     println!("Alive according to the first process: {:?}", alive_info);
+    
+    _detector_1.send(Disable).await;
 
-    sleep(delay).await;
+    sleep(4*delay/2).await;
 
     socket
         .send_to(
