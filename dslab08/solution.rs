@@ -16,7 +16,13 @@ pub struct Disable;
 
 pub struct FailureDetectorModule {
     enabled: bool,
-    // TODO add whatever fields necessary.
+    ident: Uuid,
+    alive: HashSet<Uuid>,
+    prev_alive: HashSet<Uuid>,
+    suspected: HashSet<Uuid>,
+    all_idents: HashSet<Uuid>,
+    addresses: HashMap<Uuid, SocketAddr>,
+    socket: Arc<UdpSocket>,
 }
 
 impl FailureDetectorModule {
@@ -33,7 +39,13 @@ impl FailureDetectorModule {
         let module_ref = system
             .register_module(Self {
                 enabled: true,
-                // TODO initialize the fields you added
+                alive: all_idents.clone(),
+                prev_alive: all_idents.clone(),
+                suspected: HashSet::new(),
+                ident, 
+                all_idents: all_idents.clone(),
+                addresses: addresses.clone(),
+                socket: socket.clone(),
             })
             .await;
 
@@ -50,7 +62,24 @@ impl FailureDetectorModule {
 impl Handler<DetectorOperationUdp> for FailureDetectorModule {
     async fn handle(&mut self, item: DetectorOperationUdp) {
         if self.enabled {
-            unimplemented!();
+            let operation = item.0;
+            let sock_addr = item.1;
+            match operation {
+                DetectorOperation::HeartbeatRequest => {
+                    let msg = bincode::serialize(&DetectorOperation::HeartbeatResponse(self.ident)).unwrap();
+                    self.socket.send_to(&msg, sock_addr).await.unwrap();
+                }
+                DetectorOperation::HeartbeatResponse(uuid) => {
+                    self.alive.insert(uuid);
+                }
+                DetectorOperation::AliveRequest => {
+                    let msg = bincode::serialize(&DetectorOperation::AliveInfo(self.prev_alive.clone().into_iter().collect())).unwrap();
+                    self.socket.send_to(&msg, sock_addr).await.unwrap();
+                }
+                _ => {
+                    println!("ERROR, prawdopodobnie potrzeba zaimplementować AliveResponse");
+                }
+            }
         }
     }
 }
@@ -60,7 +89,17 @@ impl Handler<DetectorOperationUdp> for FailureDetectorModule {
 impl Handler<Tick> for FailureDetectorModule {
     async fn handle(&mut self, _msg: Tick) {
         if self.enabled {
-            unimplemented!();
+            self.prev_alive = self.alive.clone();
+            for p in self.all_idents.iter() {
+                if !self.alive.contains(&p) && !self.suspected.contains(&p) {
+                    self.suspected.insert(p.clone());
+                } else if self.alive.contains(&p) && self.suspected.contains(&p) {
+                    self.suspected.remove(&p);
+                }
+                let sock_addr = self.addresses.get(p).unwrap();
+                let msg = bincode::serialize(&DetectorOperation::HeartbeatRequest).unwrap();
+                self.socket.send_to(&msg, sock_addr).await.unwrap();
+            }
         }
     }
 }
