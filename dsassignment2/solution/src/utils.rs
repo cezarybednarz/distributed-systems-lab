@@ -25,6 +25,7 @@ pub enum MessageType {
 }
 
 impl MessageType {
+    // message length without first 8 bytes
     pub fn content_size(&mut self) -> usize {
         match self {
             MessageType::Error => 0,
@@ -34,7 +35,14 @@ impl MessageType {
             MessageType::Value => 48 + PAGE_SIZE + HMAC_KEY_SIZE,
             MessageType::WriteProc => 48 + PAGE_SIZE + HMAC_KEY_SIZE,
             MessageType::Ack => 32 + HMAC_KEY_SIZE,
-            // todo wszystkie
+            MessageType::ReadResponse => 16 + HMAC_KEY_SIZE,
+            MessageType::WriteResponse => 16 + PAGE_SIZE + HMAC_KEY_SIZE,
+            MessageType::ReadProcResponse => 32 + HMAC_KEY_SIZE,
+            MessageType::ValueResponse => 48 + PAGE_SIZE + HMAC_KEY_SIZE,
+            MessageType::WriteProcResponse => 48 + PAGE_SIZE + HMAC_KEY_SIZE,
+            MessageType::AckResponse => 32 + HMAC_KEY_SIZE,
+            // todo zastanowic sie nad rozmiarem response
+            // todo zastanowic sie nad sensem response
         }
     }
 }

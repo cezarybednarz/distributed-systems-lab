@@ -85,7 +85,7 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, OperationComplete, SystemRegisterCommandContent};
+    use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, OperationComplete, SystemRegisterCommandContent, SystemRegisterCommand, SystemCommandHeader};
     use crate::{RegisterCommand, MAGIC_NUMBER};
     use std::convert::TryInto;
     use std::io::{Error, ErrorKind};
@@ -121,7 +121,7 @@ pub mod transfer_public {
         let mut buffer = vec![0; message_type.content_size()];
         data.read_exact(&mut buffer).await?;
         match message_type {
-            MessageType::Read => {
+            MessageType::Read  => {
                 let request_number = &buffer[0..7];
                 let sector_index = &buffer[8..15];
                 let hmac = &buffer[16..47];
@@ -147,7 +147,30 @@ pub mod transfer_public {
                 unimplemented!();
             }
             MessageType::ReadProc => {
-                unimplemented!();
+                let process_identifier = type_buffer[6];
+                let msg_ident = &buffer[0..15];
+                let read_ident = &buffer[16..23];
+                let sector_index = &buffer[24..31];
+                let hmac = &buffer[32..63];
+                let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..31].to_vec()].concat();
+                mac.update(&message_without_hmac[..]);
+                let result = mac.finalize().into_bytes();
+                let hmac_valid = result.as_slice() == hmac;
+                if !hmac_valid {
+                    debug!("invalid hmac of message");
+                }
+                return Ok((RegisterCommand::System(
+                    SystemRegisterCommand {
+                        header: SystemCommandHeader {
+                            process_identifier,
+                            msg_ident: Uuid::from_slice(&msg_ident).unwrap(),
+                            read_ident: u64::from_be_bytes(read_ident.try_into().unwrap()),
+                            sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
+                        },
+                        content: SystemRegisterCommandContent::ReadProc
+                    }
+                ), hmac_valid));
             }
             MessageType::Value => {
                 unimplemented!();
@@ -182,6 +205,7 @@ pub mod transfer_public {
                 buf.put_slice(header.msg_ident.as_bytes());
                 buf.put_slice(&header.read_ident.to_be_bytes());
                 buf.put_slice(&header.sector_idx.to_be_bytes());
+                // todo walidować wartosci
                 // put content of message
                 match content { 
                     SystemRegisterCommandContent::ReadProc | SystemRegisterCommandContent::Ack => {
