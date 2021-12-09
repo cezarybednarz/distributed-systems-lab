@@ -16,6 +16,12 @@ pub enum MessageType {
     Value,
     WriteProc,
     Ack,
+    ReadResponse = 0x41,
+    WriteResponse,
+    ReadProcResponse,
+    ValueResponse,
+    WriteProcResponse,
+    AckResponse,
 }
 
 impl MessageType {
@@ -28,6 +34,7 @@ impl MessageType {
             MessageType::Value => 48 + PAGE_SIZE + HMAC_KEY_SIZE,
             MessageType::WriteProc => 48 + PAGE_SIZE + HMAC_KEY_SIZE,
             MessageType::Ack => 32 + HMAC_KEY_SIZE,
+            // todo wszystkie
         }
     }
 }
@@ -41,6 +48,12 @@ impl From<u8> for MessageType {
             b if b == MessageType::Value as u8 => MessageType::Value,
             b if b == MessageType::WriteProc as u8 => MessageType::WriteProc,
             b if b == MessageType::Ack as u8 => MessageType::Ack,
+            b if b == MessageType::ReadResponse as u8 => MessageType::ReadResponse,
+            b if b == MessageType::WriteResponse as u8 => MessageType::WriteResponse,
+            b if b == MessageType::ReadProcResponse as u8 => MessageType::ReadProcResponse,
+            b if b == MessageType::ValueResponse as u8 => MessageType::ValueResponse,
+            b if b == MessageType::WriteProcResponse as u8 => MessageType::WriteProcResponse,
+            b if b == MessageType::AckResponse as u8 => MessageType::AckResponse,
             _ => MessageType::Error,
         }
     }
