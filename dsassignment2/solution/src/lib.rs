@@ -126,14 +126,11 @@ pub mod transfer_public {
                 let request_number = &buffer[0..8];
                 let sector_index = &buffer[8..16];
                 let hmac = &buffer[16..48];
-                let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
                 let message_without_hmac = [magic_buffer, type_buffer, buffer[0..16].to_vec()].concat();
+                let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
                 mac.update(&message_without_hmac[..]);
                 let result = mac.finalize().into_bytes();
                 let hmac_valid = result.as_slice() == hmac;
-                if !hmac_valid {
-                    debug!("invalid hmac of message");
-                }
                 return Ok((RegisterCommand::Client(
                     ClientRegisterCommand {
                         header: ClientCommandHeader {
@@ -145,7 +142,26 @@ pub mod transfer_public {
                 ), hmac_valid));
             }
             MessageType::Write => {
-                unimplemented!();
+                let request_number = &buffer[0..8];
+                let sector_index = &buffer[8..16];
+                let sector_data = &buffer[16..(16+PAGE_SIZE)];
+                let hmac = &buffer[(16+PAGE_SIZE)..(16+PAGE_SIZE+32)];
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..(16+PAGE_SIZE)].to_vec()].concat();
+                let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
+                mac.update(&message_without_hmac[..]);
+                let result = mac.finalize().into_bytes();
+                let hmac_valid = result.as_slice() == hmac;
+                return Ok((RegisterCommand::Client(
+                    ClientRegisterCommand {
+                        header: ClientCommandHeader {
+                            request_identifier: u64::from_be_bytes(request_number.try_into().unwrap()),
+                            sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
+                        },
+                        content: ClientRegisterCommandContent::Write {
+                            data: SectorVec(sector_data.to_vec())
+                        }
+                    }
+                ), hmac_valid));
             }
             MessageType::ReadProc => {
                 let process_identifier = type_buffer[6];
@@ -153,14 +169,11 @@ pub mod transfer_public {
                 let read_ident = &buffer[16..24];
                 let sector_index = &buffer[24..32];
                 let hmac = &buffer[32..64];
-                let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
                 let message_without_hmac = [magic_buffer, type_buffer, buffer[0..32].to_vec()].concat();
+                let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
                 mac.update(&message_without_hmac[..]);
                 let result = mac.finalize().into_bytes();
                 let hmac_valid = result.as_slice() == hmac;
-                if !hmac_valid {
-                    debug!("invalid hmac of message");
-                }
                 return Ok((RegisterCommand::System(
                     SystemRegisterCommand {
                         header: SystemCommandHeader {
@@ -169,18 +182,73 @@ pub mod transfer_public {
                             read_ident: u64::from_be_bytes(read_ident.try_into().unwrap()),
                             sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
                         },
-                        content: SystemRegisterCommandContent::ReadProc
+                        content: match message_type {
+                            MessageType::ReadProc => SystemRegisterCommandContent::ReadProc,
+                            MessageType::Ack => SystemRegisterCommandContent::Ack,
+                            _ => { return Err(Error::new(ErrorKind::InvalidData, "wrong message type")); }
+                        } 
                     }
                 ), hmac_valid));
             }
-            MessageType::Value => {
-                unimplemented!();
+            MessageType::Value | MessageType::Ack => {
+                let process_identifier = type_buffer[6];
+                let msg_ident = &buffer[0..16];
+                let read_ident = &buffer[16..24];
+                let sector_index = &buffer[24..32];
+                let timestamp = &buffer[32..40];
+                let write_rank = buffer[48];
+                let sector_data = &buffer[48..(48+PAGE_SIZE)];
+                let hmac = &buffer[(48+PAGE_SIZE)..(48+PAGE_SIZE+32)];
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..(48+PAGE_SIZE)].to_vec()].concat();
+                let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
+                mac.update(&message_without_hmac[..]);
+                let result = mac.finalize().into_bytes();
+                let hmac_valid = result.as_slice() == hmac;
+                return Ok((RegisterCommand::System(
+                    SystemRegisterCommand {
+                        header: SystemCommandHeader {
+                            process_identifier,
+                            msg_ident: Uuid::from_slice(&msg_ident).unwrap(),
+                            read_ident: u64::from_be_bytes(read_ident.try_into().unwrap()),
+                            sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
+                        },
+                        content: SystemRegisterCommandContent::Value {
+                            timestamp: u64::from_be_bytes(timestamp.try_into().unwrap()),
+                            write_rank,
+                            sector_data: SectorVec(sector_data.to_vec()),
+                        }
+                    }
+                ), hmac_valid));
             }
             MessageType::WriteProc => {
-                unimplemented!();
-            }
-            MessageType::Ack => {
-                unimplemented!();
+                let process_identifier = type_buffer[6];
+                let msg_ident = &buffer[0..16];
+                let read_ident = &buffer[16..24];
+                let sector_index = &buffer[24..32];
+                let timestamp = &buffer[32..40];
+                let write_rank = buffer[48];
+                let data_to_write = &buffer[48..(48+PAGE_SIZE)];
+                let hmac = &buffer[(48+PAGE_SIZE)..(48+PAGE_SIZE+32)];
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..(48+PAGE_SIZE)].to_vec()].concat();
+                let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
+                mac.update(&message_without_hmac[..]);
+                let result = mac.finalize().into_bytes();
+                let hmac_valid = result.as_slice() == hmac;
+                return Ok((RegisterCommand::System(
+                    SystemRegisterCommand {
+                        header: SystemCommandHeader {
+                            process_identifier,
+                            msg_ident: Uuid::from_slice(&msg_ident).unwrap(),
+                            read_ident: u64::from_be_bytes(read_ident.try_into().unwrap()),
+                            sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
+                        },
+                        content: SystemRegisterCommandContent::WriteProc {
+                            timestamp: u64::from_be_bytes(timestamp.try_into().unwrap()),
+                            write_rank,
+                            data_to_write: SectorVec(data_to_write.to_vec()),
+                        }
+                    }
+                ), hmac_valid));
             }
             _ => {
                 Err(Error::new(ErrorKind::InvalidData, "wrong message type"))
