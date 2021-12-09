@@ -9,9 +9,6 @@ pub use sectors_manager_public::*;
 use sha2::Sha256;
 pub use stable_storage_public::*;
 pub use transfer_public::*;
-use hmac::{Hmac, Mac, NewMac};
-
-
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -91,7 +88,7 @@ pub mod transfer_public {
     use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent};
     use crate::{RegisterCommand, MAGIC_NUMBER};
     use std::convert::TryInto;
-    use std::io::Error;
+    use std::io::{Error, ErrorKind};
     use log::{debug, error};
     use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt};
     use hmac::{NewMac, Mac, Hmac};
@@ -114,14 +111,14 @@ pub mod transfer_public {
         // check message type
         let mut type_buffer = vec![0; 4];
         data.read_exact(&mut type_buffer).await?;
-        let message_type = MessageType::from(type_buffer[3]);
+        let mut message_type = MessageType::from(type_buffer[3]);
         if message_type == MessageType::Error {
             error!("wrong message type: {}", type_buffer[3]);
-            Err;
+            return Err(Error::new(ErrorKind::InvalidData, "wrong message type"));
         }
         // read rest of the message according to message_type
         let mut buffer = vec![0; message_type.content_size()];
-        data.read_exact(&mut buffer);
+        data.read_exact(&mut buffer).await?;
         match message_type {
             MessageType::Read => {
                 let request_number = &buffer[0..7];
@@ -131,11 +128,11 @@ pub mod transfer_public {
                 let message_without_hmac = [magic_buffer, type_buffer, buffer[0..15].to_vec()].concat();
                 mac.update(&message_without_hmac[..]);
                 let result = mac.finalize().into_bytes();
-                let hmac_valid = result.try_into().unwrap() == hmac;
+                let hmac_valid = result.as_slice() == hmac;
                 if !hmac_valid {
                     debug!("invalid hmac of message");
                 }
-                (RegisterCommand::Client(
+                return Ok((RegisterCommand::Client(
                     ClientRegisterCommand {
                         header: ClientCommandHeader {
                             request_identifier: u64::from_be_bytes(request_number.try_into().unwrap()),
@@ -143,7 +140,7 @@ pub mod transfer_public {
                         },
                         content: ClientRegisterCommandContent::Read
                     }
-                ), hmac_valid);
+                ), hmac_valid));
             }
             MessageType::Write => {
                 unimplemented!();
@@ -161,15 +158,9 @@ pub mod transfer_public {
                 unimplemented!();
             }
             _ => {
-                error!("deserialize_register_command: unknown message type");
-                Err;
+                Err(Error::new(ErrorKind::InvalidData, "wrong message type"))
             }
         }
-
-
-
-
-        Ok((RegisterCommand, True))
     }
 
     pub async fn serialize_register_command(
