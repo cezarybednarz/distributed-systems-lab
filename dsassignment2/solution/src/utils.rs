@@ -1,10 +1,14 @@
+use std::convert::TryInto;
+
 use log::error;
 
+use crate::SectorVec;
 
-static PAGE_SIZE: usize = 4096;
-static MAX_DESCRIPTORS: usize = 1024;
-static MAX_CLIENTS: usize = 16;
-static HMAC_KEY_SIZE: usize = 32;
+
+const PAGE_SIZE: usize = 4096;
+const MAX_DESCRIPTORS: usize = 1024;
+const MAX_CLIENTS: usize = 16;
+const HMAC_KEY_SIZE: usize = 32;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -63,6 +67,16 @@ impl From<u8> for MessageType {
             b if b == MessageType::WriteProcResponse as u8 => MessageType::WriteProcResponse,
             b if b == MessageType::AckResponse as u8 => MessageType::AckResponse,
             _ => MessageType::Error,
+        }
+    }
+}
+
+impl SectorVec {
+    pub fn to_array(&mut self) -> &[u8] {
+        match self {
+            SectorVec(vec) => {
+                return &vec[..];
+            }
         }
     }
 }

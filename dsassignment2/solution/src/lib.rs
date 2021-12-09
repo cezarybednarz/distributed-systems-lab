@@ -94,6 +94,7 @@ pub mod transfer_public {
     use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
     use hmac::{NewMac, Mac, Hmac};
     use uuid::Uuid;
+    use crate::{SectorVec};
 
     pub async fn deserialize_register_command(
         data: &mut (dyn AsyncRead + Send + Unpin),
@@ -122,11 +123,11 @@ pub mod transfer_public {
         data.read_exact(&mut buffer).await?;
         match message_type {
             MessageType::Read  => {
-                let request_number = &buffer[0..7];
-                let sector_index = &buffer[8..15];
-                let hmac = &buffer[16..47];
+                let request_number = &buffer[0..8];
+                let sector_index = &buffer[8..16];
+                let hmac = &buffer[16..48];
                 let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
-                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..15].to_vec()].concat();
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..16].to_vec()].concat();
                 mac.update(&message_without_hmac[..]);
                 let result = mac.finalize().into_bytes();
                 let hmac_valid = result.as_slice() == hmac;
@@ -148,12 +149,12 @@ pub mod transfer_public {
             }
             MessageType::ReadProc => {
                 let process_identifier = type_buffer[6];
-                let msg_ident = &buffer[0..15];
-                let read_ident = &buffer[16..23];
-                let sector_index = &buffer[24..31];
-                let hmac = &buffer[32..63];
+                let msg_ident = &buffer[0..16];
+                let read_ident = &buffer[16..24];
+                let sector_index = &buffer[24..32];
+                let hmac = &buffer[32..64];
                 let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
-                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..31].to_vec()].concat();
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..32].to_vec()].concat();
                 mac.update(&message_without_hmac[..]);
                 let result = mac.finalize().into_bytes();
                 let hmac_valid = result.as_slice() == hmac;
@@ -192,16 +193,24 @@ pub mod transfer_public {
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), Error> {
+        // buffer for whole message
+        let mut buf = BytesMut::new();
         match cmd {
             RegisterCommand::System(system_cmd) => {
                 let header = system_cmd.clone().header;
                 let content = system_cmd.clone().content;
                 // put data to header of message into byte buffer
-                let mut buf = BytesMut::new();
                 buf.put_slice(&MAGIC_NUMBER);
                 buf.put_slice(&[0; 2]);
                 buf.put_u8(header.process_identifier);
-                buf.put_u8(MessageType::ReadProc as u8);
+                buf.put_u8(
+                    match content { 
+                        SystemRegisterCommandContent::ReadProc => MessageType::ReadProc as u8,
+                        SystemRegisterCommandContent::Ack => MessageType::Ack as u8,
+                        SystemRegisterCommandContent::Value { timestamp: _, write_rank: _, sector_data: _} => MessageType::Value as u8,
+                        SystemRegisterCommandContent::WriteProc { timestamp: _, write_rank: _, data_to_write: _ } => MessageType::WriteProc as u8,
+                    }
+                );
                 buf.put_slice(header.msg_ident.as_bytes());
                 buf.put_slice(&header.read_ident.to_be_bytes());
                 buf.put_slice(&header.sector_idx.to_be_bytes());
@@ -218,19 +227,42 @@ pub mod transfer_public {
                         unimplemented!();
                     },
                 }
-                // put hmac of message to the end of message
-                let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
-                mac.update(&buf);
-                let result = mac.finalize().into_bytes();
-                buf.put_slice(&result);
-                // send the message
-                writer.write_all(&buf).await?;
-                Ok(())
             }
-            _ => {
-                return Err(Error::new(ErrorKind::InvalidInput, "message type unsupported in serialization"));
+            RegisterCommand::Client(client_cmd) => {
+                let header = client_cmd.clone().header;
+                let content = client_cmd.clone().content;
+                // put data to header of message into byte buffer
+                buf.put_slice(&MAGIC_NUMBER);
+                buf.put_slice(&[0; 3]);
+                buf.put_u8(
+                    match content {
+                        ClientRegisterCommandContent::Read => MessageType::Read as u8,
+                        ClientRegisterCommandContent::Write { data: _ } => MessageType::Write as u8,
+                    }
+                );
+                buf.put_slice(&header.request_identifier.to_be_bytes());
+                buf.put_slice(&header.sector_idx.to_be_bytes());
+                // todo walidowac wartości
+                // put content of message
+                match content {
+                    ClientRegisterCommandContent::Read => {
+                        // no content
+                    }
+                    ClientRegisterCommandContent::Write { data } => {
+                        let mut d = data.clone();
+                        buf.put_slice(&d.to_array());
+                    }
+                }
             }
         }
+        // put hmac of message to the end of message
+        let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
+        mac.update(&buf);
+        let result = mac.finalize().into_bytes();
+        buf.put_slice(&result);
+        // send the message
+        writer.write_all(&buf).await?;
+        Ok(())
     }
 
     async fn serialize_operation_complete_command(
