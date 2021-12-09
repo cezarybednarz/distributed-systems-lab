@@ -214,17 +214,30 @@ pub mod transfer_public {
                 buf.put_slice(header.msg_ident.as_bytes());
                 buf.put_slice(&header.read_ident.to_be_bytes());
                 buf.put_slice(&header.sector_idx.to_be_bytes());
-                // todo walidować wartosci
                 // put content of message
                 match content { 
                     SystemRegisterCommandContent::ReadProc | SystemRegisterCommandContent::Ack => {
                         // no content
                     },
                     SystemRegisterCommandContent::Value { timestamp, write_rank, sector_data } => {
-                        unimplemented!();
+                        buf.put_u64(timestamp);
+                        buf.put_slice(&[0; 7]);
+                        buf.put_u8(write_rank);
+                        if sector_data.len() != PAGE_SIZE {
+                            return Err(Error::new(ErrorKind::InvalidData, "sector length should be 4096 bytes"));
+                        }
+                        let mut d = sector_data.clone();
+                        buf.put_slice(&d.to_array());
                     },
                     SystemRegisterCommandContent::WriteProc { timestamp, write_rank, data_to_write } => {
-                        unimplemented!();
+                        buf.put_u64(timestamp);
+                        buf.put_slice(&[0; 7]);
+                        buf.put_u8(write_rank);
+                        if data_to_write.len() != PAGE_SIZE {
+                            return Err(Error::new(ErrorKind::InvalidData, "sector length should be 4096 bytes"));
+                        }
+                        let mut d = data_to_write.clone();
+                        buf.put_slice(&d.to_array());
                     },
                 }
             }
@@ -242,7 +255,6 @@ pub mod transfer_public {
                 );
                 buf.put_slice(&header.request_identifier.to_be_bytes());
                 buf.put_slice(&header.sector_idx.to_be_bytes());
-                // todo walidowac wartości
                 // put content of message
                 match content {
                     ClientRegisterCommandContent::Read => {
@@ -261,8 +273,7 @@ pub mod transfer_public {
         let result = mac.finalize().into_bytes();
         buf.put_slice(&result);
         // send the message
-        writer.write_all(&buf).await?;
-        Ok(())
+        return writer.write_all(&buf).await;
     }
 
     async fn serialize_operation_complete_command(
