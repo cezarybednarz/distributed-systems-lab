@@ -1,11 +1,19 @@
 mod domain;
+mod utils;
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
+use hmac::Hmac;
 pub use register_client_public::*;
 pub use sectors_manager_public::*;
+use sha2::Sha256;
 pub use stable_storage_public::*;
 pub use transfer_public::*;
+use hmac::{Hmac, Mac, NewMac};
+
+
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub async fn run_register_process(config: Configuration) {
     unimplemented!()
@@ -80,16 +88,88 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::RegisterCommand;
+    use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent};
+    use crate::{RegisterCommand, MAGIC_NUMBER};
+    use std::convert::TryInto;
     use std::io::Error;
-    use tokio::io::{AsyncRead, AsyncWrite};
+    use log::{debug, error};
+    use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt};
+    use hmac::{NewMac, Mac, Hmac};
+    use uuid::Uuid;
 
     pub async fn deserialize_register_command(
         data: &mut (dyn AsyncRead + Send + Unpin),
         hmac_system_key: &[u8; 64],
         hmac_client_key: &[u8; 32],
     ) -> Result<(RegisterCommand, bool), Error> {
-        unimplemented!()
+        // slide over bytes until MAGIC_NUMBER appears
+        let mut magic_buffer = vec![0; 4];
+        data.read_exact(&mut magic_buffer).await?;
+        while magic_buffer != MAGIC_NUMBER {
+            let mut magic_byte = vec![0; 1];
+            data.read_exact(&mut magic_byte).await?;
+            magic_buffer = [magic_buffer, magic_byte].concat();
+            magic_buffer.remove(0);
+        }
+        // check message type
+        let mut type_buffer = vec![0; 4];
+        data.read_exact(&mut type_buffer).await?;
+        let message_type = MessageType::from(type_buffer[3]);
+        if message_type == MessageType::Error {
+            error!("wrong message type: {}", type_buffer[3]);
+            Err;
+        }
+        // read rest of the message according to message_type
+        let mut buffer = vec![0; message_type.content_size()];
+        data.read_exact(&mut buffer);
+        match message_type {
+            MessageType::Read => {
+                let request_number = &buffer[0..7];
+                let sector_index = &buffer[8..15];
+                let hmac = &buffer[16..47];
+                let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
+                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..15].to_vec()].concat();
+                mac.update(&message_without_hmac[..]);
+                let result = mac.finalize().into_bytes();
+                let hmac_valid = result.try_into().unwrap() == hmac;
+                if !hmac_valid {
+                    debug!("invalid hmac of message");
+                }
+                (RegisterCommand::Client(
+                    ClientRegisterCommand {
+                        header: ClientCommandHeader {
+                            request_identifier: u64::from_be_bytes(request_number.try_into().unwrap()),
+                            sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
+                        },
+                        content: ClientRegisterCommandContent::Read
+                    }
+                ), hmac_valid);
+            }
+            MessageType::Write => {
+                unimplemented!();
+            }
+            MessageType::ReadProc => {
+                unimplemented!();
+            }
+            MessageType::Value => {
+                unimplemented!();
+            }
+            MessageType::WriteProc => {
+                unimplemented!();
+            }
+            MessageType::Ack => {
+                unimplemented!();
+            }
+            _ => {
+                error!("deserialize_register_command: unknown message type");
+                Err;
+            }
+        }
+
+
+
+
+        Ok((RegisterCommand, True))
     }
 
     pub async fn serialize_register_command(
