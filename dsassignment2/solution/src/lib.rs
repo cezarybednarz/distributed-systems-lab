@@ -164,7 +164,7 @@ pub mod transfer_public {
                 ), hmac_valid));
             }
             MessageType::ReadProc | MessageType::Ack => {
-                let process_identifier = type_buffer[6];
+                let process_identifier = type_buffer[2];
                 let msg_ident = &buffer[0..16];
                 let read_ident = &buffer[16..24];
                 let sector_index = &buffer[24..32];
@@ -190,13 +190,13 @@ pub mod transfer_public {
                     }
                 ), hmac_valid));
             }
-            MessageType::WriteProc | MessageType::Value=> {
-                let process_identifier = type_buffer[6];
+            MessageType::WriteProc | MessageType::Value => {
+                let process_identifier = type_buffer[2];
                 let msg_ident = &buffer[0..16];
                 let read_ident = &buffer[16..24];
                 let sector_index = &buffer[24..32];
                 let timestamp = &buffer[32..40];
-                let write_rank = buffer[48];
+                let write_rank = buffer[47];
                 let sector_data = &buffer[48..(48+PAGE_SIZE)];
                 let hmac = &buffer[(48+PAGE_SIZE)..(48+PAGE_SIZE+32)];
                 let message_without_hmac = [magic_buffer, type_buffer, buffer[0..(48+PAGE_SIZE)].to_vec()].concat();
