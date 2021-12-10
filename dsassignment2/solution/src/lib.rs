@@ -163,7 +163,7 @@ pub mod transfer_public {
                     }
                 ), hmac_valid));
             }
-            MessageType::ReadProc => {
+            MessageType::ReadProc | MessageType::Ack => {
                 let process_identifier = type_buffer[6];
                 let msg_ident = &buffer[0..16];
                 let read_ident = &buffer[16..24];
@@ -190,7 +190,7 @@ pub mod transfer_public {
                     }
                 ), hmac_valid));
             }
-            MessageType::Value | MessageType::Ack => {
+            MessageType::WriteProc | MessageType::Value=> {
                 let process_identifier = type_buffer[6];
                 let msg_ident = &buffer[0..16];
                 let read_ident = &buffer[16..24];
@@ -212,42 +212,22 @@ pub mod transfer_public {
                             read_ident: u64::from_be_bytes(read_ident.try_into().unwrap()),
                             sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
                         },
-                        content: SystemRegisterCommandContent::Value {
-                            timestamp: u64::from_be_bytes(timestamp.try_into().unwrap()),
-                            write_rank,
-                            sector_data: SectorVec(sector_data.to_vec()),
+                        content: match message_type {
+                            MessageType::WriteProc => 
+                                SystemRegisterCommandContent::WriteProc {
+                                    timestamp: u64::from_be_bytes(timestamp.try_into().unwrap()),
+                                    write_rank,
+                                    data_to_write: SectorVec(sector_data.to_vec()),
+                                },
+                            MessageType::Value => 
+                                SystemRegisterCommandContent::Value {
+                                    timestamp: u64::from_be_bytes(timestamp.try_into().unwrap()),
+                                    write_rank,
+                                    sector_data: SectorVec(sector_data.to_vec()),
+                                },
+                            _ => { return Err(Error::new(ErrorKind::InvalidData, "wrong message type")); }
                         }
-                    }
-                ), hmac_valid));
-            }
-            MessageType::WriteProc => {
-                let process_identifier = type_buffer[6];
-                let msg_ident = &buffer[0..16];
-                let read_ident = &buffer[16..24];
-                let sector_index = &buffer[24..32];
-                let timestamp = &buffer[32..40];
-                let write_rank = buffer[48];
-                let data_to_write = &buffer[48..(48+PAGE_SIZE)];
-                let hmac = &buffer[(48+PAGE_SIZE)..(48+PAGE_SIZE+32)];
-                let message_without_hmac = [magic_buffer, type_buffer, buffer[0..(48+PAGE_SIZE)].to_vec()].concat();
-                let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
-                mac.update(&message_without_hmac[..]);
-                let result = mac.finalize().into_bytes();
-                let hmac_valid = result.as_slice() == hmac;
-                return Ok((RegisterCommand::System(
-                    SystemRegisterCommand {
-                        header: SystemCommandHeader {
-                            process_identifier,
-                            msg_ident: Uuid::from_slice(&msg_ident).unwrap(),
-                            read_ident: u64::from_be_bytes(read_ident.try_into().unwrap()),
-                            sector_idx: u64::from_be_bytes(sector_index.try_into().unwrap()),
-                        },
-                        content: SystemRegisterCommandContent::WriteProc {
-                            timestamp: u64::from_be_bytes(timestamp.try_into().unwrap()),
-                            write_rank,
-                            data_to_write: SectorVec(data_to_write.to_vec()),
-                        }
-                    }
+                    }       
                 ), hmac_valid));
             }
             _ => {
