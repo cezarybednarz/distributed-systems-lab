@@ -85,7 +85,7 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, OperationComplete, SystemRegisterCommandContent, SystemRegisterCommand, SystemCommandHeader};
+    use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, OperationComplete, SystemRegisterCommandContent, SystemRegisterCommand, SystemCommandHeader, OperationReturn};
     use crate::{RegisterCommand, MAGIC_NUMBER};
     use std::convert::TryInto;
     use std::io::{Error, ErrorKind};
@@ -329,9 +329,44 @@ pub mod transfer_public {
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), Error> {
-        unimplemented!();
+        let mut buf = BytesMut::new();
+        buf.put_slice(&MAGIC_NUMBER);
+        buf.put_slice(&[0; 2]);
+        buf.put_u8(cmd.status_code as u8);
+        buf.put_u8(
+            match cmd.op_return { 
+                OperationReturn::Read(_) => MessageType::ReadResponse as u8,
+                OperationReturn::Write => MessageType::WriteResponse as u8
+            }
+        );
+        buf.put_u64(cmd.request_identifier);
+        // put content of message
+        match &cmd.op_return {
+            OperationReturn::Read(read_return) => {
+                match &read_return.read_data {
+                    Some(data) => {
+                        let mut d = data.clone();
+                        buf.put_slice(&d.to_array());
+                    }
+                    None => {
+                        // no content
+                    }
+                }
+            }
+            OperationReturn::Write => {
+                // no content
+            }
+        }
+        // put hmac of message to the end of message
+        let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
+        mac.update(&buf);
+        let result = mac.finalize().into_bytes();
+        buf.put_slice(&result);
+        // send the message
+        return writer.write_all(&buf).await;
     }
 }
+
 
 pub mod register_client_public {
     use crate::SystemRegisterCommand;
