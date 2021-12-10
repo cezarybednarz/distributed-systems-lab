@@ -324,7 +324,7 @@ pub mod transfer_public {
         return writer.write_all(&buf).await;
     }
 
-    async fn serialize_operation_complete_command(
+    pub async fn serialize_operation_complete_command(
         cmd: &OperationComplete,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],

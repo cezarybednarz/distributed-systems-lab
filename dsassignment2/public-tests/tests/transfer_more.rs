@@ -1,7 +1,7 @@
 use assignment_2_solution::{
-  deserialize_register_command, serialize_register_command, ClientCommandHeader,
+  deserialize_register_command, serialize_register_command, serialize_operation_complete_command, ClientCommandHeader,
   ClientRegisterCommand, ClientRegisterCommandContent, RegisterCommand, SystemCommandHeader,
-  SystemRegisterCommand, SystemRegisterCommandContent, SectorVec,
+  SystemRegisterCommand, SystemRegisterCommandContent, SectorVec, OperationComplete, OperationReturn, StatusCode, ReadReturn,
 };
 use assignment_2_test_utils::transfer::*;
 use ntest::timeout;
@@ -273,4 +273,76 @@ async fn write_proc_serialize_deserialize_is_identity() {
         }
         _ => panic!("Expected WriteProc command"),
     }
+}
+
+#[tokio::test]
+#[timeout(200)]
+async fn write_response_has_correct_length() {
+    let status_code = StatusCode::AuthFailure; 
+    let request_identifier = 12345;
+
+    let write_return_cmd = OperationComplete {
+        status_code,
+        request_identifier,
+        op_return: OperationReturn::Write,
+    };
+
+    let mut serialized: Vec<u8> = Vec::new();
+
+    // when
+    serialize_operation_complete_command(&write_return_cmd, &mut serialized, &[0x00_u8; 64])
+        .await
+        .expect("Could not write to vector?");
+    
+    // then
+    assert_eq!(serialized.len(), 48);
+}
+
+#[tokio::test]
+#[timeout(200)]
+async fn read_response_has_correct_length() {
+    let status_code = StatusCode::Ok; 
+    let request_identifier = 12345;
+    let read_data = Some(get_random_sector_vec());
+
+    let write_return_cmd = OperationComplete {
+        status_code,
+        request_identifier,
+        op_return: OperationReturn::Read(ReadReturn { read_data })
+    };
+
+    let mut serialized: Vec<u8> = Vec::new();
+
+    // when
+    serialize_operation_complete_command(&write_return_cmd, &mut serialized, &[0x00_u8; 64])
+        .await
+        .expect("Could not write to vector?");
+    
+    // then
+    assert_eq!(serialized.len(), 48 + 4096);
+}
+
+
+#[tokio::test]
+#[timeout(200)]
+async fn read_response_error_has_correct_length() {
+    let status_code = StatusCode::InvalidSectorIndex; 
+    let request_identifier = 12345;
+    let read_data = None;
+
+    let write_return_cmd = OperationComplete {
+        status_code,
+        request_identifier,
+        op_return: OperationReturn::Read(ReadReturn { read_data })
+    };
+
+    let mut serialized: Vec<u8> = Vec::new();
+
+    // when
+    serialize_operation_complete_command(&write_return_cmd, &mut serialized, &[0x00_u8; 64])
+        .await
+        .expect("Could not write to vector?");
+    
+    // then
+    assert_eq!(serialized.len(), 48);
 }
