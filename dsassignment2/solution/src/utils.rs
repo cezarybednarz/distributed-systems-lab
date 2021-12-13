@@ -9,11 +9,12 @@ pub static PAGE_SIZE: usize = 4096;
 static MAX_DESCRIPTORS: usize = 1024;
 static MAX_CLIENTS: usize = 16;
 static HMAC_KEY_SIZE: usize = 32;
+pub static WORKERS_COUNT: usize = 4; // todo zwiekszyc na 256
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum MessageType {
-    Error, // todo może Ok i Error na końcu
+    Error, 
     Read,
     Write,
     ReadProc,

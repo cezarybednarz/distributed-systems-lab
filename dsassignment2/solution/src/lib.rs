@@ -64,6 +64,10 @@ pub mod sectors_manager_public {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    struct MySectorsManager {
+        path: PathBuf,
+    }
+
     #[async_trait::async_trait]
     pub trait SectorsManager: Send + Sync {
         /// Returns 4096 bytes of sector data by index.
@@ -80,7 +84,22 @@ pub mod sectors_manager_public {
 
     /// Path parameter points to a directory to which this method has exclusive access.
     pub fn build_sectors_manager(path: PathBuf) -> Arc<dyn SectorsManager> {
-        unimplemented!()
+        Arc::new(MySectorsManager { path })
+    }
+
+    #[async_trait::async_trait] 
+    impl SectorsManager for MySectorsManager {
+        async fn read_data(&self, idx: SectorIdx) -> SectorVec {
+            unimplemented!();
+        }
+
+        async fn read_metadata(&self, idx: SectorIdx) -> (u64, u8) {
+            unimplemented!();
+        }
+
+        async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
+            unimplemented!();
+        }
     }
 }
 
@@ -395,14 +414,61 @@ pub mod register_client_public {
     }
 }
 
+
+
 pub mod stable_storage_public {
-    #[async_trait::async_trait]
+    use std::path::PathBuf;
+    use sha2::{Sha256, Digest};
+    use tokio::{fs::{File, rename, read}, io::AsyncWriteExt};
+
     /// A helper trait for small amount of durable metadata needed by the register algorithm
     /// itself. Again, it is only for AtomicRegister definition. StableStorage in unit tests
     /// is durable, as one could expect.
+    #[async_trait::async_trait]
     pub trait StableStorage: Send + Sync {
         async fn put(&mut self, key: &str, value: &[u8]) -> Result<(), String>;
 
         async fn get(&self, key: &str) -> Option<Vec<u8>>;
     }
+    
+    fn get_hash(name: &str) -> String {
+        let mut sha256 = Sha256::new();
+        sha256.update(name);
+        let hash = sha256.finalize();
+        return format!("{:X}", hash);
+    }
+
+    struct MyStableStorage {
+        path: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StableStorage for MyStableStorage {
+        async fn put(&mut self, key: &str, value: &[u8]) -> Result<(), String> {
+            let filename = get_hash(key);
+            let tmp_filename = "tmp_".to_owned() + &filename;
+            let mut tmp_path = self.path.clone();
+            let mut path = self.path.clone();
+            tmp_path.push(tmp_filename);
+            path.push(filename);
+            let mut file = File::create(tmp_path.clone()).await.unwrap();
+            file.write_all(value).await.unwrap();
+            file.sync_data().await.unwrap();
+            rename(tmp_path, path).await.unwrap();
+            file.sync_data().await.unwrap();
+            Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Option<Vec<u8>> {
+            let filename = get_hash(key);
+            let mut path = self.path.clone();
+            path.push(filename);
+            match read(path).await {
+                Ok(value) => Some(value),
+                Err(_) => None,
+            }
+        }
+
+    }
+    
 }
