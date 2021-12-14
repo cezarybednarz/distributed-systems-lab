@@ -415,7 +415,7 @@ pub mod register_client_public {
 }
 
 
-
+// todo nieprzetestowane
 pub mod stable_storage_public {
     use std::path::PathBuf;
     use sha2::{Sha256, Digest};

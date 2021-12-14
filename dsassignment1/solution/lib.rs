@@ -1,159 +1,198 @@
-use std::{sync::Arc, time::Duration};
+use async_channel::{unbounded, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::time::{self, Duration};
 use tokio::task::JoinHandle;
-use async_channel::{Receiver, Sender, unbounded};
-use tokio::time;
-use core::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use log::error;
+
+
 
 pub trait Message: Send + 'static {}
+
 impl<T: Send + 'static> Message for T {}
 
-/// A trait for modules capable of handling messages of type `M`.
+/// A trait for modules capable of handling messages of type M.
 #[async_trait::async_trait]
 pub trait Handler<M: Message>
-where
-    M: Message,
+    where
+        M: Message,
 {
     /// Handles the message.
     async fn handle(&mut self, msg: M);
 }
 
-trait Closable {
-    fn rx_close(&self);
-}
-impl<T> Closable for Receiver<T> {
-    fn rx_close(&self) {
-        self.close();
-    }
-}
-
-/// The message sent as a result of calling `System::request_tick()`.
+/// The message sent as a result of calling System::request_tick().
 #[derive(Debug, Clone)]
 pub struct Tick {}
 
 pub struct System {
-    /// Handle of the tokio task, if module is shut down, receiver of module messages
-    module_refs: Vec<(JoinHandle<()>, Arc<AtomicBool>, Box<dyn Closable>)>,
+    shutdown: Arc<AtomicBool>,
+    tasks: Vec<(JoinHandle<()>,  Box<dyn Closable>)>,
 }
 
 impl System {
-    /// Schedules a `Tick` message to be sent to the given module periodically
+    /// Schedules a Tick message to be sent to the given module periodically
     /// with the given interval. The first tick is sent immediately.
     pub async fn request_tick<T: Handler<Tick> + Send>(
         &mut self,
         requester: &ModuleRef<T>,
         delay: Duration,
-    ) { 
-        let requester_clone = requester.clone();
-        let _task_handle = tokio::spawn( async move {
-            let mut interval_delay = time::interval(delay);
-            interval_delay.tick().await;
-            while !requester_clone.shutdown.load(Ordering::Relaxed) { 
-                match requester_clone.message_tx.try_send(Box::new(Tick{})) {
-                    Ok(()) => {
-                        interval_delay.tick().await;
-                    }
-                    _ => {
-                        break;
-                    }
+    ) {
+        // after the system is shut down, consecutive function calls panic
+        // https://moodle.mimuw.edu.pl/mod/forum/discuss.php?d=6381
+        // Wojciech Ciszewski:
+        // "[...]. Funkcje po shutdownie mogą panikować lub nic nie robić,
+        // ale należy zapewnić, że shutdown nie spowoduje panica w żadnym handlerze."
+        if self.shutdown.load(Ordering::Relaxed) {
+            panic!();
+        }
+
+        // take ownership to be able to move into async block
+        let shutdown_clone = self.shutdown.clone(); //
+        let req_clone = requester.clone();
+
+        // prepare the interval
+        let mut interval = time::interval(delay);
+        interval.tick().await; // first interval takes 0s
+
+        let task = tokio::spawn(async move {
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                let res = req_clone.tx.send(Box::new(Tick {})).await;
+                match res {
+                    Ok(_) => {}, // Tick successfully sent
+                    Err(_) => break // Channel is closed => system shut down => finish task
                 }
-                
+                interval.tick().await;
             }
         });
+        // store handle and channel to join and close respectively during shutdown
+        self.tasks.push((task, Box::new(requester.clone().tx)));
     }
 
     /// Registers the module in the system.
-    /// Returns a `ModuleRef`, which can be used then to send messages to the module.
+    /// Returns a ModuleRef, which can be used then to send messages to the module.
     pub async fn register_module<T: Send + 'static>(&mut self, module: T) -> ModuleRef<T> {
-        let (message_tx, message_rx) = unbounded();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let module_ref = ModuleRef {
-            message_tx,
-            shutdown: shutdown.clone(),
-        };
+        if self.shutdown.load(Ordering::Relaxed) {
+            panic!();
+        }
+        let mut mut_mod = module;
+        let (tx, rx): (Sender<Box<dyn Handlee<T>>>, Receiver<Box<dyn Handlee<T>>>) = unbounded();
 
-        let message_rx_clone = message_rx.clone();
-        let shutdown_clone = shutdown.clone();
+        let rx_clone = rx.clone();
+        let shutdown_clone = self.shutdown.clone();
 
-        let module_handle = tokio::spawn(async move {
-            let mut mut_mod = module;
-            loop {
-                match shutdown.load(Ordering::Relaxed) {
-                    false => {
-                        message_rx.recv().await.unwrap().get_handled(&mut mut_mod).await;
-                    }
-                    true => {
-                        break;
-                    }
+        let task = tokio::spawn(async move {
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                let res = rx_clone.recv().await;
+                match res {
+                    Ok(msg) => {
+                        // system is shut down so do not proceed with message handling
+                        if shutdown_clone.load(Ordering::Relaxed) {
+                            break; // some messages could still be in the channel but it's not a problem
+                        }
+                        msg.get_handled(&mut mut_mod).await;
+                    },
+                    Err(_) => break,
                 }
             }
         });
-        self.module_refs.push((module_handle, shutdown_clone, Box::new(message_rx_clone)));
-        module_ref
+        self.tasks.push((task, Box::new(rx)));
+        ModuleRef { tx }
     }
 
     /// Creates and starts a new instance of the system.
     pub async fn new() -> Self {
-        System {
-            module_refs: Vec::new(),
-        }
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let tasks = Vec::new();
+        System { shutdown, tasks }
     }
 
     /// Gracefully shuts the system down.
     pub async fn shutdown(&mut self) {
-        for (_, shutdown, _) in self.module_refs.iter_mut() {
-            shutdown.store(true, Ordering::Relaxed);
+        if self.shutdown.load(Ordering::Relaxed) {
+            panic!();
         }
-        for (_, _, message_rx) in self.module_refs.iter_mut() {
-            message_rx.rx_close();
+        self.shutdown.store(true, Ordering::Relaxed);
+        for (task, rx) in &mut self.tasks {
+            rx.close();
+            let res = task.await;
+            match res {
+                Ok(_) => {}, // task successfully joined
+                Err(e) => error!("Some join resulted in an error: {}.", e),
+            };
         }
-        for (module_handle, _, _) in self.module_refs.iter_mut() {
-            let _ = module_handle.await;
-        }
-        // after shutdown system is in the beginning state
-        self.module_refs = Vec::new();
-    }
-}
-
-// trait mentioned in task's hint
-#[async_trait::async_trait]
-trait Handlee<T>: Send + 'static
-where
-    T: Send,
-{
-    async fn get_handled(self: Box<Self>, module: &mut T);
-}
-
-#[async_trait::async_trait]
-impl<M, T> Handlee<T> for M
-where
-    T: Handler<M> + Send,
-    M: Message,
-{
-    async fn get_handled(self: Box<Self>, module: &mut T) {
-        module.handle(*self).await
     }
 }
 
 /// A reference to a module used for sending messages.
 pub struct ModuleRef<T: Send + 'static> {
-    message_tx: Sender<Box<dyn Handlee<T>>>,
-    shutdown: Arc<AtomicBool>,
+    tx: Sender<Box<dyn Handlee<T>>>,
 }
 
 impl<T: Send> ModuleRef<T> {
     /// Sends the message to the module.
     pub async fn send<M: Message>(&self, msg: M)
-    where
-        T: Handler<M>,
+        where
+            T: Handler<M>,
     {
-        self.message_tx.send(Box::new(msg)).await.unwrap();
+        let res = self.tx.send(Box::new(msg)).await;
+        match res {
+            Ok(_) => {}, // message successfully sent
+            Err(e) => error!("Sending a message by ModuleRef resulted in an error: {}.", e),
+        }
+        //self.tx.send(Box::new(msg)).await.unwrap();
     }
 }
 
 impl<T: Send> Clone for ModuleRef<T> {
     /// Creates a new reference to the same module.
     fn clone(&self) -> Self {
-        ModuleRef { message_tx: self.message_tx.clone(), shutdown: self.shutdown.clone() }
+        ModuleRef {
+            tx: self.tx.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+trait Handlee<T>: Send + 'static
+    where
+        T: Send,
+{
+    async fn get_handled(self: Box<Self>, module: &mut T);
+}
+
+#[async_trait::async_trait]
+impl<M, T> Handlee<T> for M
+    where
+        T: Handler<M> + Send,
+        M: Message,
+{
+    async fn get_handled(self: Box<Self>, module: &mut T) {
+        module.handle(*self).await
+    }
+}
+
+// Helper trait to store channel for messages in a system
+#[async_trait::async_trait]
+trait Closable
+{
+    fn close(&self) -> bool;
+}
+#[async_trait::async_trait]
+impl<T> Closable for Receiver<Box<dyn Handlee<T>>>
+    where
+        T: Send
+{
+    fn close(&self) -> bool {
+        self.close()
+    }
+}
+#[async_trait::async_trait]
+impl<T> Closable for Sender<Box<dyn Handlee<T>>>
+    where
+        T: Send
+{
+    fn close(&self) -> bool {
+        self.close()
     }
 }

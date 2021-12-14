@@ -83,7 +83,6 @@ async fn initialize_system(sys: &mut System) -> Receiver<String> {
 }
 
 #[tokio::test]
-#[timeout(300)]
 async fn ping_pong_runs_correctly() {
     let mut sys = System::new().await;
     let log_receiver = initialize_system(sys.borrow_mut()).await;
@@ -143,7 +142,6 @@ async fn set_timer(
 }
 
 #[tokio::test]
-#[timeout(300)]
 async fn second_tick_arrives_after_correct_interval() {
     let mut sys = System::new().await;
     let (timeout_sender, timeout_receiver) = unbounded::<Timeout>();
