@@ -1,6 +1,5 @@
 use async_channel::Sender;
 use executor::{Handler, ModuleRef, System};
-use std::convert::TryInto;
 use std::future::Future;
 use std::pin::Pin;
 use uuid::Uuid;
