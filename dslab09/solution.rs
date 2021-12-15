@@ -219,12 +219,11 @@ impl Handler<NodeMsg> for CyberStore2047 {
                         true => Some(TwoPhaseResult::Abort),
                         false => Some(TwoPhaseResult::Ok),
                     };
-                    if let Some(cb) = self.completed_callback.take() {
+                    if let Some(callback) = self.completed_callback.take() {
                         if let Some(result) = self.result.take() {
-                            cb(result).await;
+                            callback(result).await;
                         }
                     }
-                    println!("callback! aborted:{}", self.aborted);
                     self.prepared_nodes = 0;
                     self.commited_nodes = 0;
                     self.aborted = false;
@@ -246,8 +245,14 @@ impl Handler<StoreMsg> for Node {
                     for product in self.products.iter_mut() {
                         if product.pr_type == transaction.pr_type {
                             let mut add_result = true;
-                            if (transaction.shift <= 0 && (-transaction.shift) >= product.price.try_into().unwrap())
-                                || (transaction.shift > 0 && product.price.checked_add(transaction.shift.try_into().unwrap()) == None) {
+                            let add_val = product.price.checked_add(transaction.shift as u64);
+                            let sub_val = product.price.checked_sub((transaction.shift as i64).abs() as u64);
+                            if transaction.shift <= 0 {
+                                if sub_val.is_none() || sub_val.unwrap() <= 0 {
+                                    add_result = false;
+                                }
+                            }
+                            if transaction.shift > 0 && add_val.is_none() {
                                 add_result = false;
                             }
                             let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
@@ -270,7 +275,7 @@ impl Handler<StoreMsg> for Node {
                         let transaction = self.pending_transaction.unwrap();
                         if product.pr_type == transaction.pr_type {
                             if transaction.shift <= 0 {
-                                product.price += (-transaction.shift) as u64;
+                                product.price -= (transaction.shift as i64).abs() as u64;
                             } else {
                                 product.price += transaction.shift as u64;
                             }
