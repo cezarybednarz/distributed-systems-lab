@@ -117,6 +117,8 @@ pub(crate) struct CyberStore2047 {
     commited_nodes: usize,
     aborted: bool,
     completed_callback: Option<Box<dyn FnOnce(TwoPhaseResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+    result: Option<TwoPhaseResult>,
+
 }
 
 impl CyberStore2047 {
@@ -128,6 +130,7 @@ impl CyberStore2047 {
             commited_nodes: 0,
             aborted: false,
             completed_callback: None,
+            result: None,
         }
     }
 }
@@ -212,16 +215,21 @@ impl Handler<NodeMsg> for CyberStore2047 {
             NodeMsgContent::FinalizationAck => {
                 self.commited_nodes += 1;
                 if self.commited_nodes == self.nodes.len() {
-                    let result = match self.aborted {
-                        true => TwoPhaseResult::Abort,
-                        false => TwoPhaseResult::Ok,
+                    self.result = match self.aborted {
+                        true => Some(TwoPhaseResult::Abort),
+                        false => Some(TwoPhaseResult::Ok),
                     };
-                    (self.completed_callback.take().unwrap())(result);
+                    if let Some(cb) = self.completed_callback.take() {
+                        if let Some(result) = self.result.take() {
+                            cb(result).await;
+                        }
+                    }
                     println!("callback! aborted:{}", self.aborted);
                     self.prepared_nodes = 0;
                     self.commited_nodes = 0;
                     self.aborted = false;
                     self.completed_callback = None;
+                    self.result = None;
                 }
             }
         }
