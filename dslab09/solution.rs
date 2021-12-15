@@ -1,6 +1,5 @@
 use async_channel::Sender;
 use executor::{Handler, ModuleRef, System};
-use log::error;
 use std::convert::TryInto;
 use std::future::Future;
 use std::pin::Pin;
@@ -217,14 +216,8 @@ impl Handler<NodeMsg> for CyberStore2047 {
                         true => TwoPhaseResult::Abort,
                         false => TwoPhaseResult::Ok,
                     };
-                    match std::mem::replace(&mut self.completed_callback, None) {
-                        Some(callback) => {
-                            (callback)(result);
-                        },
-                        None => { 
-                            error!("no callback in Store");
-                        }
-                    }
+                    (self.completed_callback.take().unwrap())(result);
+                    println!("callback! aborted:{}", self.aborted);
                     self.prepared_nodes = 0;
                     self.commited_nodes = 0;
                     self.aborted = false;
@@ -247,12 +240,10 @@ impl Handler<StoreMsg> for Node {
                             let mut add_result = true;
                             if (transaction.shift <= 0 && (-transaction.shift) >= product.price.try_into().unwrap())
                                 || (transaction.shift > 0 && product.price.checked_add(transaction.shift.try_into().unwrap()) == None) {
-                                add_result = false; 
-                                // todo tu moze byc zle!!!
-                                break;
+                                add_result = false;
                             }
                             let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
-                            if add_result {
+                            if add_result == true {
                                 msg.sender.send(NodeMsg {
                                     sender: module_ref_clone,
                                     content: NodeMsgContent::RequestVoteResponse(TwoPhaseResult::Ok)
