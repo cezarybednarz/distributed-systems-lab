@@ -1,5 +1,6 @@
 use async_channel::Sender;
-use executor::{Handler, ModuleRef, System, Message};
+use executor::{Handler, ModuleRef, System};
+use log::error;
 use std::convert::TryInto;
 use std::future::Future;
 use std::pin::Pin;
@@ -115,7 +116,8 @@ pub(crate) struct CyberStore2047 {
     nodes: Vec<ModuleRef<Node>>,
     prepared_nodes: usize,
     commited_nodes: usize,
-    aborted_transaction: bool,
+    aborted: bool,
+    completed_callback: Option<Box<dyn FnOnce(TwoPhaseResult) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
 }
 
 impl CyberStore2047 {
@@ -125,7 +127,8 @@ impl CyberStore2047 {
             nodes,
             prepared_nodes: 0,
             commited_nodes: 0,
-            aborted_transaction: false,
+            aborted: false,
+            completed_callback: None,
         }
     }
 }
@@ -137,7 +140,6 @@ pub(crate) struct Node {
     products: Vec<Product>,
     pending_transaction: Option<Transaction>,
     enabled: bool,
-    prev_products: Vec<Product>,
     module_ref: Option<ModuleRef<Node>>
 }
 
@@ -147,7 +149,6 @@ impl Node {
             products: products.clone(),
             pending_transaction: None,
             enabled: true,
-            prev_products: products,
             module_ref: None,
         }
     }
@@ -174,7 +175,7 @@ impl Handler<NodeMsg> for CyberStore2047 {
             NodeMsgContent::RequestVoteResponse(result) => {
                 match result {
                     TwoPhaseResult::Ok => {
-                        if !self.aborted_transaction {
+                        if !self.aborted {
                             self.prepared_nodes += 1;
                             if self.prepared_nodes == self.nodes.len() {
                                 let mut tasks = Vec::new();
@@ -192,8 +193,8 @@ impl Handler<NodeMsg> for CyberStore2047 {
                         }
                     }
                     TwoPhaseResult::Abort => {
-                        if !self.aborted_transaction {
-                            self.aborted_transaction = true;
+                        if !self.aborted {
+                            self.aborted = true;
                             let mut tasks = Vec::new();
                             for node in &self.nodes {
                                 let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
@@ -212,7 +213,22 @@ impl Handler<NodeMsg> for CyberStore2047 {
             NodeMsgContent::FinalizationAck => {
                 self.commited_nodes += 1;
                 if self.commited_nodes == self.nodes.len() {
-                    // todo
+                    let result = match self.aborted {
+                        true => TwoPhaseResult::Abort,
+                        false => TwoPhaseResult::Ok,
+                    };
+                    match std::mem::replace(&mut self.completed_callback, None) {
+                        Some(callback) => {
+                            (callback)(result);
+                        },
+                        None => { 
+                            error!("no callback in Store");
+                        }
+                    }
+                    self.prepared_nodes = 0;
+                    self.commited_nodes = 0;
+                    self.aborted = false;
+                    self.completed_callback = None;
                 }
             }
         }
@@ -228,18 +244,15 @@ impl Handler<StoreMsg> for Node {
                     self.pending_transaction = Some(transaction);
                     for product in self.products.iter_mut() {
                         if product.pr_type == transaction.pr_type {
-                            let mut result = true;
+                            let mut add_result = true;
                             if (transaction.shift <= 0 && (-transaction.shift) >= product.price.try_into().unwrap())
                                 || (transaction.shift > 0 && product.price.checked_add(transaction.shift.try_into().unwrap()) == None) {
-                                result = false;
+                                add_result = false; 
+                                // todo tu moze byc zle!!!
+                                break;
                             }
                             let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
-                            if result {
-                                if transaction.shift <= 0 {
-                                    (*product).price += (-transaction.shift) as u64;
-                                } else {
-                                    product.price += transaction.shift as u64;
-                                }
+                            if add_result {
                                 msg.sender.send(NodeMsg {
                                     sender: module_ref_clone,
                                     content: NodeMsgContent::RequestVoteResponse(TwoPhaseResult::Ok)
@@ -254,8 +267,17 @@ impl Handler<StoreMsg> for Node {
                     }
                 }
                 StoreMsgContent::Commit => {
+                    for product in self.products.iter_mut() {
+                        let transaction = self.pending_transaction.unwrap();
+                        if product.pr_type == transaction.pr_type {
+                            if transaction.shift <= 0 {
+                                product.price += (-transaction.shift) as u64;
+                            } else {
+                                product.price += transaction.shift as u64;
+                            }
+                        }
+                    }
                     self.pending_transaction = None;
-                    self.prev_products = self.products.clone();
                     let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
                     msg.sender.send(NodeMsg {
                         sender: module_ref_clone,
@@ -264,7 +286,6 @@ impl Handler<StoreMsg> for Node {
                 }
                 StoreMsgContent::Abort => {
                     self.pending_transaction = None;
-                    self.products = self.prev_products.clone();
                     let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
                     msg.sender.send(NodeMsg {
                         sender: module_ref_clone,
@@ -280,33 +301,16 @@ impl Handler<StoreMsg> for Node {
 impl Handler<ProductPriceQuery> for Node {
     async fn handle(&mut self, msg: ProductPriceQuery) {
         if self.enabled {
-            match self.pending_transaction {
-                Some(_) => {
-                    let mut found = false;
-                    for product in &self.prev_products {
-                        if product.identifier == msg.product_ident {
-                            found = true;
-                            msg.result_sender.send(ProductPrice(Some(product.price))).await.unwrap();
-                            break;
-                        }
-                    }
-                    if !found {
-                        msg.result_sender.send(ProductPrice(None)).await.unwrap();
-                    }
+            let mut found = false;
+            for product in &self.products {
+                if product.identifier == msg.product_ident {
+                    found = true;
+                    msg.result_sender.send(ProductPrice(Some(product.price))).await.unwrap();
+                    break;
                 }
-                None => {
-                    let mut found = false;
-                    for product in &self.products {
-                        if product.identifier == msg.product_ident {
-                            found = true;
-                            msg.result_sender.send(ProductPrice(Some(product.price))).await.unwrap();
-                            break;
-                        }
-                    }
-                    if !found {
-                        msg.result_sender.send(ProductPrice(None)).await.unwrap();
-                    }
-                }
+            }
+            if !found {
+                msg.result_sender.send(ProductPrice(None)).await.unwrap();
             }
         }
     }
@@ -322,6 +326,17 @@ impl Handler<Disable> for Node {
 #[async_trait::async_trait]
 impl Handler<TransactionMessage> for CyberStore2047 {
     async fn handle(&mut self, msg: TransactionMessage) {
-        // todo
+        self.completed_callback = Some(msg.completed_callback);
+        let mut tasks = Vec::new();
+        for node in &self.nodes {
+            let module_ref_clone = self.module_ref.as_ref().unwrap().clone();
+            tasks.push(node.send(StoreMsg {
+                sender: module_ref_clone,
+                content: StoreMsgContent::RequestVote(msg.transaction)
+            }));
+        }
+        for task in tasks {
+            task.await;
+        }
     }
 }
