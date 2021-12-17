@@ -1,15 +1,13 @@
-use std::convert::TryInto;
-
 use log::error;
 
-use crate::SectorVec;
+use crate::{SectorVec, SectorIdx};
 
 
 pub static PAGE_SIZE: usize = 4096;
 static MAX_DESCRIPTORS: usize = 1024;
 static MAX_CLIENTS: usize = 16;
 static HMAC_KEY_SIZE: usize = 32;
-pub static WORKERS_COUNT: usize = 4; // todo zwiekszyc na 256
+pub static WORKERS_COUNT: u64 = 4; // todo zwiekszyc na 256
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -31,7 +29,7 @@ pub enum MessageType {
 
 impl MessageType {
     // message length without first 8 bytes
-    pub fn content_size(&mut self) -> usize {
+    pub(crate) fn content_size(&mut self) -> usize {
         match self {
             MessageType::Error => 0,
             MessageType::Read => 16 + HMAC_KEY_SIZE,
@@ -69,18 +67,30 @@ impl From<u8> for MessageType {
 }
 
 impl SectorVec {
-    pub fn to_array(&mut self) -> &[u8] {
+    pub(crate) fn to_array(&mut self) -> &[u8] {
         match self {
             SectorVec(vec) => {
                 return &vec[..];
             }
         }
     }
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             SectorVec(vec) => {
                 return vec.len();
             }
         }
     }
+}
+
+pub(crate) fn get_worker_id(idx: SectorIdx) -> u64 {
+    idx % WORKERS_COUNT
+}
+
+pub(crate) fn get_sector_in_worker_id(idx: SectorIdx) -> u64 {
+    idx / WORKERS_COUNT
+}
+
+pub(crate) fn get_filename_from_idx(idx: SectorIdx) -> String {
+    get_worker_id(idx).to_string() + &String::from("_") + &get_sector_in_worker_id(idx).to_string()
 }

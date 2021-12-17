@@ -60,12 +60,17 @@ pub mod atomic_register_public {
 }
 
 pub mod sectors_manager_public {
-    use crate::{SectorIdx, SectorVec};
+    use log::error;
+
+    use crate::utils::{get_worker_id, get_sector_in_worker_id, get_filename_from_idx};
+    use crate::{SectorIdx, SectorVec, MyStableStorage, StableStorage};
+    use std::convert::TryInto;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     struct MySectorsManager {
         path: PathBuf,
+        stable_storage: MyStableStorage,
     }
 
     #[async_trait::async_trait]
@@ -84,34 +89,53 @@ pub mod sectors_manager_public {
 
     /// Path parameter points to a directory to which this method has exclusive access.
     pub fn build_sectors_manager(path: PathBuf) -> Arc<dyn SectorsManager> {
-        Arc::new(MySectorsManager { path })
-    }
+        Arc::new(MySectorsManager { 
+            path: path.clone(),
+            stable_storage: MyStableStorage { path }
+        })
+    }   
 
     #[async_trait::async_trait] 
     impl SectorsManager for MySectorsManager {
         async fn read_data(&self, idx: SectorIdx) -> SectorVec {
-            unimplemented!();
+            let filename = get_filename_from_idx(idx);
+            let data = self.stable_storage.get(&filename).await.unwrap();
+            let data_bytes = &data[9..];
+            SectorVec(data_bytes.to_vec())
         }
 
         async fn read_metadata(&self, idx: SectorIdx) -> (u64, u8) {
-            unimplemented!();
+            let filename = get_filename_from_idx(idx);
+            let data = self.stable_storage.get(&filename).await.unwrap();
+            let ts_bytes = &data[0..8];
+            let ts = u64::from_be_bytes(ts_bytes.try_into().unwrap());
+            let wr = data[8];
+            (ts, wr)
         }
 
+        // key: <worker_id>_<sector_in_worker_id>
+        // data: ts (8 bytes), wr (1 byte), sector_data (4096 bytes)
         async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
-            unimplemented!();
+            let (SectorVec(sector_data), ts, wr) = sector;
+            let ts_bytes = &ts.to_be_bytes()[..];
+            let wr_bytes = &wr.to_be_bytes()[..];
+            let sector_data_bytes = sector_data.as_slice();
+            let metadata_with_data = [ts_bytes, wr_bytes, sector_data_bytes].concat();
+            let filename = get_filename_from_idx(idx);
+            self.stable_storage.put_non_mut(&filename, &metadata_with_data).await.unwrap();
         }
     }
 }
 
 pub mod transfer_public {
-    use crate::{utils::*, HmacSha256, Configuration, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, OperationComplete, SystemRegisterCommandContent, SystemRegisterCommand, SystemCommandHeader, OperationReturn};
+    use crate::{utils::*, HmacSha256, ClientCommandHeader, ClientRegisterCommand, ClientRegisterCommandContent, OperationComplete, SystemRegisterCommandContent, SystemRegisterCommand, SystemCommandHeader, OperationReturn};
     use crate::{RegisterCommand, MAGIC_NUMBER};
     use std::convert::TryInto;
     use std::io::{Error, ErrorKind};
     use bytes::{BytesMut, BufMut};
-    use log::{debug, error};
+    use log::{error};
     use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-    use hmac::{NewMac, Mac, Hmac};
+    use hmac::{NewMac, Mac};
     use uuid::Uuid;
     use crate::{SectorVec};
 
@@ -343,6 +367,7 @@ pub mod transfer_public {
         return writer.write_all(&buf).await;
     }
 
+    // todo zmienić visibility tego
     pub async fn serialize_operation_complete_command(
         cmd: &OperationComplete,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
@@ -438,13 +463,12 @@ pub mod stable_storage_public {
         return format!("{:X}", hash);
     }
 
-    struct MyStableStorage {
-        path: PathBuf,
+    pub(crate) struct MyStableStorage {
+        pub(crate) path: PathBuf,
     }
 
-    #[async_trait::async_trait]
-    impl StableStorage for MyStableStorage {
-        async fn put(&mut self, key: &str, value: &[u8]) -> Result<(), String> {
+    impl MyStableStorage {
+        pub(crate) async fn put_non_mut(&self, key: &str, value: &[u8]) -> Result<(), String> {
             let filename = get_hash(key);
             let tmp_filename = "tmp_".to_owned() + &filename;
             let mut tmp_path = self.path.clone();
@@ -457,6 +481,13 @@ pub mod stable_storage_public {
             rename(tmp_path, path).await.unwrap();
             file.sync_data().await.unwrap();
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StableStorage for MyStableStorage {
+        async fn put(&mut self, key: &str, value: &[u8]) -> Result<(), String> {
+            self.put_non_mut(key, value).await
         }
 
         async fn get(&self, key: &str) -> Option<Vec<u8>> {
