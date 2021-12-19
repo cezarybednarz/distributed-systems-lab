@@ -62,7 +62,7 @@ pub mod atomic_register_public {
 pub mod sectors_manager_public {
     use log::error;
 
-    use crate::utils::{get_worker_id, get_sector_in_worker_id, get_filename_from_idx};
+    use crate::utils::{get_filename_from_idx};
     use crate::{SectorIdx, SectorVec, MyStableStorage, StableStorage};
     use std::convert::TryInto;
     use std::path::PathBuf;
@@ -413,8 +413,11 @@ pub mod transfer_public {
 
 
 pub mod register_client_public {
-    use crate::SystemRegisterCommand;
-    use std::sync::Arc;
+    use log::error;
+    use tokio::{net::TcpStream, io::AsyncWriteExt};
+
+    use crate::{SystemRegisterCommand, HmacSha256, RegisterCommand, serialize_register_command, SystemRegisterCommandContent};
+    use std::{sync::Arc, io::Write};
 
     #[async_trait::async_trait]
     /// We do not need any public implementation of this trait. It is there for use
@@ -436,6 +439,49 @@ pub mod register_client_public {
         pub cmd: Arc<SystemRegisterCommand>,
         /// Identifier of the target process. Those start at 1.
         pub target: usize,
+    }
+
+    pub(crate) struct MyRegisterClient {
+        pub(crate) hmac_system_key: [u8; 64],
+        pub(crate) tcp_addrs: Vec<(String, u16)>,
+        // todo cachowanie wiadomości
+    }
+
+    #[async_trait::async_trait]
+    impl RegisterClient for MyRegisterClient {
+        async fn send(&self, msg: Send) {
+            let mut writer = vec![];
+            match serialize_register_command(
+                &RegisterCommand::System((&*msg.cmd).clone()),
+                writer.by_ref(), 
+                &self.hmac_system_key,
+            ).await {
+                Ok(_) => {
+                    let addr = self.tcp_addrs.get(msg.target-1).unwrap();
+                    let stream = TcpStream::connect(addr).await;
+                    match stream {
+                        Ok(mut socket) => {
+                            socket.write_all(writer.as_slice()).await.ok();
+                        }
+                        Err(err) => {
+                            error!("Send(): couln't send to socket: {}", err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("error during Send to target {} in serializing: {}", msg.target, err);
+                }
+            }
+        }
+
+        async fn broadcast(&self, msg: Broadcast) {
+            for target in 1..=self.tcp_addrs.len() {
+                self.send(Send {
+                    cmd: msg.cmd.clone(),
+                    target,
+                }).await;
+            }
+        }
     }
 }
 
