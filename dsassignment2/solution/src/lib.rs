@@ -420,6 +420,8 @@ pub mod atomic_register_public {
 
 pub mod sectors_manager_public {
 
+    use log::error;
+
     use crate::utils::{get_filename_from_idx};
     use crate::{SectorIdx, SectorVec, MyStableStorage, StableStorage};
     use std::convert::TryInto;
@@ -464,7 +466,13 @@ pub mod sectors_manager_public {
 
         async fn read_metadata(&self, idx: SectorIdx) -> (u64, u8) {
             let filename = get_filename_from_idx(idx);
-            let data = self.stable_storage.get(&filename).await.unwrap();
+            let data = match self.stable_storage.get(&filename).await {
+                None => {
+                    error!("no metadata in stable storage, returning (0, 0)");
+                    return (0, 0);
+                },
+                Some(d) => d
+            };
             let ts_bytes = &data[0..8];
             let ts = u64::from_be_bytes(ts_bytes.try_into().unwrap());
             let wr = data[8];
