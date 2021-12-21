@@ -60,6 +60,7 @@ pub mod atomic_register_public {
         ) {
             let sector_idx = cmd.header.sector_idx;
             self.recover_sector(sector_idx).await;
+            self.operation_complete = operation_complete;
             match cmd.content {
                 // upon event < nnar, Read > do
                 //     rid := rid + 1;
@@ -160,7 +161,11 @@ pub mod atomic_register_public {
         writing: bool,
         write_phase: bool,
         recovered_sectors: HashSet<u64>,
-        
+        operation_complete: Box<
+            dyn FnOnce(OperationComplete) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                + Send
+                + Sync,
+        >,
     }
 
     /// Idents are numbered starting at 1 (up to the number of processes in the system).
