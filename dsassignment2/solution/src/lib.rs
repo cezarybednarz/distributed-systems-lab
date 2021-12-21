@@ -412,7 +412,7 @@ pub mod atomic_register_public {
         );
         // Recovery of rid
         atomic_register.rid = u64::from_be_bytes(
-            atomic_register.metadata.get("rid").await.unwrap_or([0u8; 1].to_vec())[..].try_into().unwrap()
+            atomic_register.metadata.get("rid").await.unwrap_or([0u8; 8].to_vec())[..].try_into().unwrap()
         );
         atomic_register
     }
