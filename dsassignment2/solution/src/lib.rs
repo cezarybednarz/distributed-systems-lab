@@ -145,7 +145,7 @@ pub mod atomic_register_public {
                                     header: SystemCommandHeader {
                                         process_identifier: self.self_ident,
                                         msg_ident: Uuid::new_v4(),
-                                        read_ident: cmd.header.read_ident,
+                                        read_ident: r,
                                         sector_idx,
                                     },
                                     content: SystemRegisterCommandContent::Value {
@@ -211,7 +211,7 @@ pub mod atomic_register_public {
                                 let (ts, wr, val) = (&(maxts + 1), &self.self_ident, self.writeval);
                                 self.ts.insert(sector_idx, *ts);
                                 self.wr.insert(sector_idx, *wr);
-                                self.sectors_manager.write(sector_idx, &(val, *ts, *wr));
+                                self.sectors_manager.write(sector_idx, &(val, *ts, *wr)).await;
                                 self.register_client.broadcast(
                                     register_client_public::Broadcast {
                                         cmd: Arc::new(
@@ -241,7 +241,29 @@ pub mod atomic_register_public {
                 //         store(ts, wr, val);
                 //     trigger < sl, Send | p, [ACK, r] >;
                 SystemRegisterCommandContent::WriteProc { timestamp, write_rank, data_to_write } => {
-
+                    let ts = self.ts.get(&sector_idx).unwrap();
+                    let wr = self.wr.get(&sector_idx).unwrap();
+                    if (timestamp, write_rank) > (*ts, *wr) {
+                        self.ts.insert(sector_idx, timestamp);
+                        self.wr.insert(sector_idx, write_rank);
+                        self.sectors_manager.write(sector_idx, &(data_to_write, timestamp, write_rank)).await;
+                    }
+                    self.register_client.send(
+                        register_client_public::Send {
+                            cmd: Arc::new(
+                                SystemRegisterCommand {
+                                    header: SystemCommandHeader {
+                                        process_identifier: self.self_ident,
+                                        msg_ident: Uuid::new_v4(),
+                                        read_ident: r,
+                                        sector_idx,
+                                    },
+                                    content: SystemRegisterCommandContent::Ack
+                                }
+                            ),
+                            target: q as usize,
+                        }
+                    ).await;
                 }
                 // upon event < sl, Deliver | q, [ACK, r] > such that r == rid and write_phase do
                 //     acklist[q] := Ack;
