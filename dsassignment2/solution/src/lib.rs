@@ -13,13 +13,15 @@ pub use transfer_public::*;
 type HmacSha256 = Hmac<Sha256>;
 
 pub async fn run_register_process(config: Configuration) {
+    // todo osobno folder na kazdy atomic register
+    // todo inicjalizować całe stable storage na 0 
     unimplemented!()
 }
 
 pub mod atomic_register_public {
     use uuid::Uuid;
 
-    use crate::{utils::*, SectorVec, ClientRegisterCommandContent, ClientRegisterCommand, OperationComplete, SystemRegisterCommand, SystemCommandHeader, SystemRegisterCommandContent, Broadcast, StableStorage, RegisterClient, SectorsManager};
+    use crate::{utils::*, SectorVec, ClientRegisterCommandContent, ClientRegisterCommand, OperationComplete, SystemRegisterCommand, SystemCommandHeader, SystemRegisterCommandContent, Broadcast, StableStorage, RegisterClient, SectorsManager, register_client_public};
     use std::collections::{HashMap, HashSet};
     use std::convert::TryInto;
     use std::future::Future;
@@ -40,8 +42,6 @@ pub mod atomic_register_public {
                     + Sync,
             >,
         );
-        // todo osobno folder na kazdy atomic register
-        // todo inicjalizować całe stable storage na 0 
         /// Send system command to the register.
         async fn system_command(&mut self, cmd: SystemRegisterCommand);
     }
@@ -60,7 +60,7 @@ pub mod atomic_register_public {
         ) {
             let sector_idx = cmd.header.sector_idx;
             self.recover_sector(sector_idx).await;
-            self.operation_complete = operation_complete;
+            self.operation_complete = Some(operation_complete);
             match cmd.content {
                 // upon event < nnar, Read > do
                 //     rid := rid + 1;
@@ -107,7 +107,7 @@ pub mod atomic_register_public {
                     self.writing = true;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
                     self.register_client.broadcast(
-                        Broadcast {
+                        register_client_public::Broadcast {
                             cmd: Arc::new(
                                 SystemRegisterCommand {
                                     header: SystemCommandHeader {
@@ -127,9 +127,140 @@ pub mod atomic_register_public {
 
         /// Send system command to the register.
         async fn system_command(&mut self, cmd: SystemRegisterCommand) {
-            unimplemented!();
+            let sector_idx = cmd.header.sector_idx;
+            self.recover_sector(sector_idx).await;
+            let r = cmd.header.read_ident;
+            let q = cmd.header.process_identifier;
+            match cmd.content {
+                // upon event < sbeb, Deliver | p [READ_PROC, r] > do
+                //     trigger < sl, Send | p, [VALUE, r, ts, wr, val] >;
+                SystemRegisterCommandContent::ReadProc => {
+                    let ts = self.ts.get(&sector_idx).unwrap();
+                    let wr = self.wr.get(&sector_idx).unwrap();
+                    let val = self.sectors_manager.read_data(sector_idx).await;
+                    self.register_client.send(
+                        register_client_public::Send {
+                            cmd: Arc::new(
+                                SystemRegisterCommand {
+                                    header: SystemCommandHeader {
+                                        process_identifier: self.self_ident,
+                                        msg_ident: Uuid::new_v4(),
+                                        read_ident: cmd.header.read_ident,
+                                        sector_idx,
+                                    },
+                                    content: SystemRegisterCommandContent::Value {
+                                        timestamp: *ts,
+                                        write_rank: *wr,
+                                        sector_data: val,
+                                    },
+                                }
+                            ),
+                            target: q as usize,
+                        }
+                    ).await;
+                }
+                // upon event <sl, Deliver | q, [VALUE, r, ts', wr', v'] > such that r == rid and !write_phase do
+                //     readlist[q] := (ts', wr', v');
+                //     if #(readlist) > N / 2 and (reading or writing) then
+                //         readlist[self] := (ts, wr, val);
+                //         (maxts, rr, readval) := highest(readlist);
+                //         readlist := [ _ ] `of length` N;
+                //         acklist := [ _ ] `of length` N;
+                //         write_phase := TRUE;
+                //         if reading = TRUE then
+                //             trigger < sbeb, Broadcast | [WRITE_PROC, rid, maxts, rr, readval] >;
+                //         else
+                //             (ts, wr, val) := (maxts + 1, rank(self), writeval);
+                //             store(ts, wr, val);
+                //             trigger < sbeb, Broadcast | [WRITE_PROC, rid, maxts + 1, rank(self), writeval] >;
+                SystemRegisterCommandContent::Value { timestamp, write_rank, sector_data } => {
+                    if r == self.rid && !self.write_phase {
+                        self.readlist.insert(q, (timestamp, write_rank, sector_data));
+                        if self.readlist.len() > self.processes_count / 2 {
+                            let ts = self.ts.get(&sector_idx).unwrap();
+                            let wr = self.wr.get(&sector_idx).unwrap();
+                            let val = self.sectors_manager.read_data(sector_idx).await; 
+                            self.readlist.insert(self.self_ident, (*ts, *wr, val));
+                            let (maxts, rr, readval) = highest(self.readlist);
+                            self.readval = readval;
+                            self.readlist = HashMap::new();
+                            self.acklist = HashSet::new();
+                            self.write_phase = true;
+                            if self.reading {
+                                self.register_client.broadcast(
+                                    register_client_public::Broadcast {
+                                        cmd: Arc::new(
+                                            SystemRegisterCommand {
+                                                header: SystemCommandHeader {
+                                                    process_identifier: self.self_ident,
+                                                    msg_ident: Uuid::new_v4(),
+                                                    read_ident: self.rid, 
+                                                    sector_idx,
+                                                },
+                                                content: SystemRegisterCommandContent::WriteProc {
+                                                    timestamp: maxts,
+                                                    write_rank: rr,
+                                                    data_to_write: self.readval,
+                                                }
+                                            }
+                                        )
+                                    }
+                                ).await;
+                            }
+                            else {
+                                let (ts, wr, val) = (&(maxts + 1), &self.self_ident, self.writeval);
+                                self.ts.insert(sector_idx, *ts);
+                                self.wr.insert(sector_idx, *wr);
+                                self.sectors_manager.write(sector_idx, &(val, *ts, *wr));
+                                self.register_client.broadcast(
+                                    register_client_public::Broadcast {
+                                        cmd: Arc::new(
+                                            SystemRegisterCommand {
+                                                header: SystemCommandHeader {
+                                                    process_identifier: self.self_ident,
+                                                    msg_ident: Uuid::new_v4(),
+                                                    read_ident: self.rid, 
+                                                    sector_idx,
+                                                },
+                                                content: SystemRegisterCommandContent::WriteProc {
+                                                    timestamp: maxts + 1,
+                                                    write_rank: self.self_ident,
+                                                    data_to_write: self.writeval,
+                                                }
+                                            }
+                                        )
+                                    }
+                                ).await;
+                            }
+                        }
+                    }
+                }
+                // upon event < sbeb, Deliver | p, [WRITE_PROC, r, ts', wr', v'] > do
+                //     if (ts', wr') > (ts, wr) then
+                //         (ts, wr, val) := (ts', wr', v');
+                //         store(ts, wr, val);
+                //     trigger < sl, Send | p, [ACK, r] >;
+                SystemRegisterCommandContent::WriteProc { timestamp, write_rank, data_to_write } => {
+
+                }
+                // upon event < sl, Deliver | q, [ACK, r] > such that r == rid and write_phase do
+                //     acklist[q] := Ack;
+                //     if #(acklist) > N / 2 and (reading or writing) then
+                //         acklist := [ _ ] `of length` N;
+                //         write_phase := FALSE;
+                //         if reading = TRUE then
+                //             reading := FALSE;
+                //             trigger < nnar, ReadReturn | readval >;
+                //         else
+                //             writing := FALSE;
+                //             trigger < nnar, WriteReturn >;
+                SystemRegisterCommandContent::Ack => {
+
+                }
+            }
         }
     }
+    
     impl MyAtomicRegister {
         // check if sector was already recovered
         // if not put data from stable storage to local hashmaps
@@ -144,6 +275,17 @@ pub mod atomic_register_public {
         }
     }
 
+    fn highest(map: HashMap<u8, (u64, u8, SectorVec)>) -> (u64, u8, SectorVec) {
+        let ret = (0u64, 0u8, empty_sector());
+        for (_, curr) in map {
+            if (curr.0 > ret.0) 
+            || (curr.0 == ret.0 && curr.1 > ret.1) {
+                ret = curr;
+            }
+        }
+        ret
+    }
+
     pub(crate) struct MyAtomicRegister {
         self_ident: u8,
         metadata: Box<dyn StableStorage>,
@@ -153,7 +295,7 @@ pub mod atomic_register_public {
         rid: u64,
         ts: HashMap<u64, u64>,
         wr: HashMap<u64, u8>,
-        readlist: HashSet<u64>,
+        readlist: HashMap<u8, (u64, u8, SectorVec)>,
         acklist: HashSet<u64>,
         readval: SectorVec,
         writeval: SectorVec,
@@ -161,10 +303,12 @@ pub mod atomic_register_public {
         writing: bool,
         write_phase: bool,
         recovered_sectors: HashSet<u64>,
-        operation_complete: Box<
-            dyn FnOnce(OperationComplete) -> Pin<Box<dyn Future<Output = ()> + Send>>
-                + Send
-                + Sync,
+        operation_complete: Option<
+            Box<
+                dyn FnOnce(OperationComplete) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                    + Send
+                    + Sync,
+            >
         >,
     }
 
@@ -198,6 +342,7 @@ pub mod atomic_register_public {
                 writing: false,
                 write_phase: false,
                 recovered_sectors: HashSet::new(),
+                operation_complete: None,
             }
         );
         // Recovery of rid
