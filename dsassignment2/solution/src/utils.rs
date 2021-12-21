@@ -1,13 +1,19 @@
+use std::{convert::TryInto, collections::HashMap, mem};
+
 use log::error;
 
 use crate::{SectorVec, SectorIdx};
 
 
 pub static PAGE_SIZE: usize = 4096;
+pub static WORKERS_COUNT: u64 = 4; // todo zwiekszyc na 256
+static HMAC_KEY_SIZE: usize = 32;
 static MAX_DESCRIPTORS: usize = 1024;
 static MAX_CLIENTS: usize = 16;
-static HMAC_KEY_SIZE: usize = 32;
-pub static WORKERS_COUNT: u64 = 4; // todo zwiekszyc na 256
+
+pub(crate) fn empty_sector() -> SectorVec {
+    SectorVec([0u8; 4096].to_vec())
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -93,4 +99,75 @@ pub(crate) fn get_sector_in_worker_id(idx: SectorIdx) -> u64 {
 
 pub(crate) fn get_filename_from_idx(idx: SectorIdx) -> String {
     get_worker_id(idx).to_string() + &String::from("_") + &get_sector_in_worker_id(idx).to_string()
+}
+
+// serialize hashmaps and hashsets
+pub(crate) fn serialize_hashmap_u64_u64(map: HashMap<u64, u64>) -> Vec<u8> {
+    let mut data = vec![];
+    for (key, value) in &map {
+        data.extend(key.to_be_bytes().iter().cloned());
+        data.extend(value.to_be_bytes().iter().cloned());
+    }
+    data
+}
+
+pub(crate) fn serialize_hashmap_u64_u8(map: HashMap<u64, u8>) -> Vec<u8> {
+    let mut data = vec![];
+    for (key, value) in &map {
+        data.extend(key.to_be_bytes().iter().cloned());
+        data.extend(value.to_be_bytes().iter().cloned());
+    }
+    data
+}
+
+pub(crate) fn serialize_hashmap_u64_sector_vec(map: HashMap<u64, SectorVec>) -> Vec<u8> {
+    let mut data = vec![];
+    for (key, SectorVec(value)) in &map {
+        data.extend(key.to_be_bytes().iter().cloned());
+        data.extend(value.iter().cloned());
+    }
+    data
+}
+
+// deserialize hashmaps and hashsets
+pub(crate) fn deserialize_hashmap_u64_u64(bytes: Vec<u8>) -> HashMap<u64, u64> {
+    let mut map = HashMap::new();
+    let bytes_chunks = bytes.chunks_exact(8+8);
+    for bytes_chunk in bytes_chunks {
+        let key = &bytes_chunk[..8];
+        let val = &bytes_chunk[8..16];
+        map.insert(
+            u64::from_be_bytes(key.try_into().unwrap()),
+            u64::from_be_bytes(val.try_into().unwrap())
+        );
+    }
+    map
+}
+
+pub(crate) fn deserialize_hashmap_u64_u8(bytes: Vec<u8>) -> HashMap<u64, u8> {
+    let mut map = HashMap::new();
+    let bytes_chunks = bytes.chunks_exact(8+1);
+    for bytes_chunk in bytes_chunks {
+        let key = &bytes_chunk[..8];
+        let val = &bytes_chunk[8..9];
+        map.insert(
+            u64::from_be_bytes(key.try_into().unwrap()),
+            u8::from_be_bytes(val.try_into().unwrap())
+        );
+    }
+    map
+}
+
+pub(crate) fn deserialize_hashmap_u64_sector_vec(bytes: Vec<u8>) -> HashMap<u64, SectorVec> {
+    let mut map = HashMap::new();
+    let bytes_chunks = bytes.chunks_exact(8+PAGE_SIZE);
+    for bytes_chunk in bytes_chunks {
+        let key = &bytes_chunk[..8];
+        let val = &bytes_chunk[8..(8+PAGE_SIZE)];
+        map.insert(
+            u64::from_be_bytes(key.try_into().unwrap()),
+            SectorVec(val.try_into().unwrap())
+        );
+    }
+    map
 }

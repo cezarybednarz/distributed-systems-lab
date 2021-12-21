@@ -17,10 +17,13 @@ pub async fn run_register_process(config: Configuration) {
 }
 
 pub mod atomic_register_public {
+    use crate::{utils::*, SectorVec};
     use crate::{
         ClientRegisterCommand, OperationComplete, RegisterClient, SectorsManager, StableStorage,
         SystemRegisterCommand,
     };
+    use std::collections::{HashMap, HashSet};
+    use std::convert::TryInto;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -39,9 +42,51 @@ pub mod atomic_register_public {
                     + Sync,
             >,
         );
+        // todo osobno folder na kazdy atomic register
 
         /// Send system command to the register.
         async fn system_command(&mut self, cmd: SystemRegisterCommand);
+    }
+
+
+    #[async_trait::async_trait]
+    impl AtomicRegister for MyAtomicRegister {
+        async fn client_command(
+            &mut self,
+            cmd: ClientRegisterCommand,
+            operation_complete: Box<
+                dyn FnOnce(OperationComplete) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                    + Send
+                    + Sync,
+            >,
+        ) {
+            unimplemented!(); 
+        }
+
+        /// Send system command to the register.
+        async fn system_command(&mut self, cmd: SystemRegisterCommand) {
+            unimplemented!();
+        }
+    }
+    
+    pub(crate) struct MyAtomicRegister {
+        self_ident: u8,
+        metadata: Box<dyn StableStorage>,
+        register_client: Arc<dyn RegisterClient>,
+        sectors_manager: Arc<dyn SectorsManager>,
+        processes_count: usize,
+        rid: u8,
+        ts: HashMap<u64, u64>,
+        wr: HashMap<u64, u8>,
+        readlist: HashSet<u64>,
+        acklist: HashSet<u64>,
+        readval: SectorVec,
+        writeval: SectorVec,
+        val: SectorVec,
+        reading: bool,
+        writing: bool,
+        write_phase: bool,
+        max_sector: u64, // todo zapisać to wyżej do storage
     }
 
     /// Idents are numbered starting at 1 (up to the number of processes in the system).
@@ -55,12 +100,47 @@ pub mod atomic_register_public {
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: usize,
     ) -> Box<dyn AtomicRegister> {
-        unimplemented!()
+        // Init
+        let mut atomic_register = Box::new(
+            MyAtomicRegister {
+                self_ident,
+                metadata,
+                register_client, 
+                sectors_manager,
+                processes_count,
+                rid: 0,
+                ts: HashMap::new(),
+                wr: HashMap::new(),
+                readlist: HashSet::new(),
+                acklist: HashSet::new(),
+                readval: empty_sector(),
+                writeval: empty_sector(),
+                val: empty_sector(),
+                reading: false,
+                writing: false,
+                write_phase: false,
+                max_sector: 0u64,
+            }
+        );
+        // Recovery
+        atomic_register.max_sector = u64::from_be_bytes(
+            atomic_register.metadata.get("max_sector").await.unwrap_or([0u8; 8].to_vec()).try_into().unwrap()
+        );
+        atomic_register.rid = atomic_register.metadata.get("rid").await.unwrap_or([0u8; 1].to_vec())[0];
+        
+        let mut sector_idx = (self_ident - 1) as u64;
+        while sector_idx < atomic_register.max_sector {
+            let (ts, wr) = atomic_register.sectors_manager.read_metadata(sector_idx).await;
+            atomic_register.ts.insert(sector_idx, ts);
+            atomic_register.wr.insert(sector_idx, wr);
+            sector_idx += WORKERS_COUNT;
+        }
+        
+        atomic_register
     }
 }
 
 pub mod sectors_manager_public {
-    use log::error;
 
     use crate::utils::{get_filename_from_idx};
     use crate::{SectorIdx, SectorVec, MyStableStorage, StableStorage};
@@ -464,12 +544,12 @@ pub mod register_client_public {
                             socket.write_all(writer.as_slice()).await.ok();
                         }
                         Err(err) => {
-                            error!("Send(): couln't send to socket: {}", err);
+                            error!("send(): couln't send to socket: {}", err);
                         }
                     }
                 }
                 Err(err) => {
-                    error!("error during Send to target {} in serializing: {}", msg.target, err);
+                    error!("error during send() to target {} in serializing: {}", msg.target, err);
                 }
             }
         }
@@ -488,9 +568,12 @@ pub mod register_client_public {
 
 // todo nieprzetestowane
 pub mod stable_storage_public {
-    use std::path::PathBuf;
+    use core::num;
+    use std::{path::PathBuf, collections::{HashMap, HashSet}, os::unix::prelude::OsStrExt, mem};
     use sha2::{Sha256, Digest};
     use tokio::{fs::{File, rename, read}, io::AsyncWriteExt};
+
+    use crate::utils::*;
 
     /// A helper trait for small amount of durable metadata needed by the register algorithm
     /// itself. Again, it is only for AtomicRegister definition. StableStorage in unit tests
