@@ -86,7 +86,7 @@ pub mod atomic_register_public {
         reading: bool,
         writing: bool,
         write_phase: bool,
-        max_sector: u64, // todo zapisać to wyżej do storage
+        recovered_sectors: HashSet<u64>,
     }
 
     /// Idents are numbered starting at 1 (up to the number of processes in the system).
@@ -119,23 +119,11 @@ pub mod atomic_register_public {
                 reading: false,
                 writing: false,
                 write_phase: false,
-                max_sector: 0u64,
+                recovered_sectors: HashSet::new(),
             }
         );
-        // Recovery
-        atomic_register.max_sector = u64::from_be_bytes(
-            atomic_register.metadata.get("max_sector").await.unwrap_or([0u8; 8].to_vec()).try_into().unwrap()
-        );
+        // Recovery of rid
         atomic_register.rid = atomic_register.metadata.get("rid").await.unwrap_or([0u8; 1].to_vec())[0];
-        
-        let mut sector_idx = (self_ident - 1) as u64;
-        while sector_idx < atomic_register.max_sector {
-            let (ts, wr) = atomic_register.sectors_manager.read_metadata(sector_idx).await;
-            atomic_register.ts.insert(sector_idx, ts);
-            atomic_register.wr.insert(sector_idx, wr);
-            sector_idx += WORKERS_COUNT;
-        }
-        
         atomic_register
     }
 }
