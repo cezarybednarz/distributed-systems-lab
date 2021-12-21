@@ -73,7 +73,7 @@ pub mod atomic_register_public {
                 ClientRegisterCommandContent::Read => {
                     self.rid += 1;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
-                    self.readlist = HashSet::new();
+                    self.readlist = HashMap::new();
                     self.acklist = HashSet::new();
                     self.reading = true;
                     self.register_client.broadcast(
@@ -104,7 +104,7 @@ pub mod atomic_register_public {
                     self.rid += 1;
                     self.writeval = data;
                     self.acklist = HashSet::new();
-                    self.readlist = HashSet::new();
+                    self.readlist = HashMap::new();
                     self.writing = true;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
                     self.register_client.broadcast(
@@ -182,7 +182,7 @@ pub mod atomic_register_public {
                             let wr = self.wr.get(&sector_idx).unwrap();
                             let val = self.sectors_manager.read_data(sector_idx).await; 
                             self.readlist.insert(self.self_ident, (*ts, *wr, val));
-                            let (maxts, rr, readval) = highest(self.readlist);
+                            let (maxts, rr, readval) = highest(&self.readlist);
                             self.readval = readval;
                             self.readlist = HashMap::new();
                             self.acklist = HashSet::new();
@@ -201,7 +201,7 @@ pub mod atomic_register_public {
                                                 content: SystemRegisterCommandContent::WriteProc {
                                                     timestamp: maxts,
                                                     write_rank: rr,
-                                                    data_to_write: self.readval,
+                                                    data_to_write: self.readval.clone(),
                                                 }
                                             }
                                         )
@@ -209,7 +209,7 @@ pub mod atomic_register_public {
                                 ).await;
                             }
                             else {
-                                let (ts, wr, val) = (&(maxts + 1), &self.self_ident, self.writeval);
+                                let (ts, wr, val) = (&(maxts + 1), &self.self_ident, self.writeval.clone());
                                 self.ts.insert(sector_idx, *ts);
                                 self.wr.insert(sector_idx, *wr);
                                 self.sectors_manager.write(sector_idx, &(val, *ts, *wr)).await;
@@ -226,7 +226,7 @@ pub mod atomic_register_public {
                                                 content: SystemRegisterCommandContent::WriteProc {
                                                     timestamp: maxts + 1,
                                                     write_rank: self.self_ident,
-                                                    data_to_write: self.writeval,
+                                                    data_to_write: self.writeval.clone(),
                                                 }
                                             }
                                         )
@@ -340,12 +340,12 @@ pub mod atomic_register_public {
         }
     }
 
-    fn highest(map: HashMap<u8, (u64, u8, SectorVec)>) -> (u64, u8, SectorVec) {
-        let ret = (0u64, 0u8, empty_sector());
+    fn highest(map: &HashMap<u8, (u64, u8, SectorVec)>) -> (u64, u8, SectorVec) {
+        let mut ret = (0u64, 0u8, empty_sector());
         for (_, curr) in map {
             if (curr.0 > ret.0) 
             || (curr.0 == ret.0 && curr.1 > ret.1) {
-                ret = curr;
+                ret = (*curr).clone();
             }
         }
         ret
@@ -399,7 +399,7 @@ pub mod atomic_register_public {
                 rid: 0u64,
                 ts: HashMap::new(),
                 wr: HashMap::new(),
-                readlist: HashSet::new(),
+                readlist: HashMap::new(),
                 acklist: HashSet::new(),
                 readval: empty_sector(),
                 writeval: empty_sector(),
