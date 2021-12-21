@@ -19,9 +19,10 @@ pub async fn run_register_process(config: Configuration) {
 }
 
 pub mod atomic_register_public {
+    use log::error;
     use uuid::Uuid;
 
-    use crate::{utils::*, SectorVec, ClientRegisterCommandContent, ClientRegisterCommand, OperationComplete, SystemRegisterCommand, SystemCommandHeader, SystemRegisterCommandContent, Broadcast, StableStorage, RegisterClient, SectorsManager, register_client_public};
+    use crate::{utils::*, SectorVec, ClientRegisterCommandContent, ClientRegisterCommand, OperationComplete, SystemRegisterCommand, SystemCommandHeader, SystemRegisterCommandContent, Broadcast, StableStorage, RegisterClient, SectorsManager, register_client_public, StatusCode, OperationReturn, ReadReturn};
     use std::collections::{HashMap, HashSet};
     use std::convert::TryInto;
     use std::future::Future;
@@ -277,7 +278,49 @@ pub mod atomic_register_public {
                 //             writing := FALSE;
                 //             trigger < nnar, WriteReturn >;
                 SystemRegisterCommandContent::Ack => {
-
+                    if r == self.rid && self.write_phase {
+                        self.acklist.insert(q);
+                        if self.acklist.len() > self.processes_count / 2 && (self.reading || self.writing) {
+                            self.acklist = HashSet::new();
+                            self.write_phase = false;
+                            if self.reading {
+                                self.reading = false;
+                                if let Some(callback) = self.operation_complete.take() {
+                                    callback(
+                                        OperationComplete {
+                                            status_code: StatusCode::Ok,
+                                            request_identifier: self.rid, 
+                                            op_return: OperationReturn::Read(
+                                                ReadReturn {
+                                                    read_data: Some(self.readval.clone())
+                                                }
+                                            ),
+                                        }
+                                    ).await;
+                                    self.operation_complete = None;
+                                }
+                                else {
+                                    error!("Ack: error unpacking operation complete");
+                                }
+                            }
+                            else {
+                                self.writing = false;
+                                if let Some(callback) = self.operation_complete.take() {
+                                    callback(
+                                        OperationComplete {
+                                            status_code: StatusCode::Ok,
+                                            request_identifier: self.rid, 
+                                            op_return: OperationReturn::Write,
+                                        }
+                                    ).await;
+                                    self.operation_complete = None;
+                                }
+                                else {
+                                    error!("Ack: error unpacking operation complete");
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -318,7 +361,7 @@ pub mod atomic_register_public {
         ts: HashMap<u64, u64>,
         wr: HashMap<u64, u8>,
         readlist: HashMap<u8, (u64, u8, SectorVec)>,
-        acklist: HashSet<u64>,
+        acklist: HashSet<u8>,
         readval: SectorVec,
         writeval: SectorVec,
         reading: bool,
