@@ -17,11 +17,9 @@ pub async fn run_register_process(config: Configuration) {
 }
 
 pub mod atomic_register_public {
-    use crate::{utils::*, SectorVec};
-    use crate::{
-        ClientRegisterCommand, OperationComplete, RegisterClient, SectorsManager, StableStorage,
-        SystemRegisterCommand,
-    };
+    use uuid::Uuid;
+
+    use crate::{utils::*, SectorVec, ClientRegisterCommandContent, ClientRegisterCommand, OperationComplete, SystemRegisterCommand, SystemCommandHeader, SystemRegisterCommandContent, Broadcast, StableStorage, RegisterClient, SectorsManager};
     use std::collections::{HashMap, HashSet};
     use std::convert::TryInto;
     use std::future::Future;
@@ -43,7 +41,7 @@ pub mod atomic_register_public {
             >,
         );
         // todo osobno folder na kazdy atomic register
-
+        // todo inicjalizować całe stable storage na 0 
         /// Send system command to the register.
         async fn system_command(&mut self, cmd: SystemRegisterCommand);
     }
@@ -60,7 +58,70 @@ pub mod atomic_register_public {
                     + Sync,
             >,
         ) {
-            unimplemented!(); 
+            let sector_idx = cmd.header.sector_idx;
+            self.recover_sector(sector_idx).await;
+            match cmd.content {
+                // upon event < nnar, Read > do
+                //     rid := rid + 1;
+                //     store(rid);
+                //     readlist := [ _ ] `of length` N;
+                //     acklist := [ _ ] `of length` N;
+                //     reading := TRUE;
+                //     trigger < sbeb, Broadcast | [READ_PROC, rid] >;
+                ClientRegisterCommandContent::Read => {
+                    self.rid += 1;
+                    self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
+                    self.readlist = HashSet::new();
+                    self.acklist = HashSet::new();
+                    self.reading = true;
+                    self.register_client.broadcast(
+                        Broadcast {
+                            cmd: Arc::new(
+                                SystemRegisterCommand {
+                                    header: SystemCommandHeader {
+                                        process_identifier: self.self_ident,
+                                        msg_ident: Uuid::new_v4(),
+                                        read_ident: self.rid, 
+                                        sector_idx,
+                                    },
+                                    content: SystemRegisterCommandContent::ReadProc
+                                }
+                            )
+                        }
+                    ).await;
+                }
+                // upon event < nnar, Write | v > do
+                //     rid := rid + 1;
+                //     writeval := v;
+                //     acklist := [ _ ] `of length` N;
+                //     readlist := [ _ ] `of length` N;
+                //     writing := TRUE;
+                //     store(rid);
+                //     trigger < sbeb, Broadcast | [READ_PROC, rid] >;
+                ClientRegisterCommandContent::Write {data} => {
+                    self.rid += 1;
+                    self.writeval = data;
+                    self.acklist = HashSet::new();
+                    self.readlist = HashSet::new();
+                    self.writing = true;
+                    self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
+                    self.register_client.broadcast(
+                        Broadcast {
+                            cmd: Arc::new(
+                                SystemRegisterCommand {
+                                    header: SystemCommandHeader {
+                                        process_identifier: self.self_ident,
+                                        msg_ident: Uuid::new_v4(),
+                                        read_ident: self.rid, 
+                                        sector_idx,
+                                    },
+                                    content: SystemRegisterCommandContent::ReadProc
+                                }
+                            )
+                        }
+                    ).await;
+                }
+            }
         }
 
         /// Send system command to the register.
@@ -68,25 +129,38 @@ pub mod atomic_register_public {
             unimplemented!();
         }
     }
-    
+    impl MyAtomicRegister {
+        // check if sector was already recovered
+        // if not put data from stable storage to local hashmaps
+        async fn recover_sector(&mut self, sector_idx: u64) {
+            if self.recovered_sectors.contains(&sector_idx) {
+                return;
+            }
+            let (ts, wr) = self.sectors_manager.read_metadata(sector_idx).await;
+            self.recovered_sectors.insert(sector_idx);
+            self.ts.insert(sector_idx, ts);
+            self.wr.insert(sector_idx, wr);
+        }
+    }
+
     pub(crate) struct MyAtomicRegister {
         self_ident: u8,
         metadata: Box<dyn StableStorage>,
         register_client: Arc<dyn RegisterClient>,
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: usize,
-        rid: u8,
+        rid: u64,
         ts: HashMap<u64, u64>,
         wr: HashMap<u64, u8>,
         readlist: HashSet<u64>,
         acklist: HashSet<u64>,
         readval: SectorVec,
         writeval: SectorVec,
-        val: SectorVec,
         reading: bool,
         writing: bool,
         write_phase: bool,
         recovered_sectors: HashSet<u64>,
+        
     }
 
     /// Idents are numbered starting at 1 (up to the number of processes in the system).
@@ -108,14 +182,13 @@ pub mod atomic_register_public {
                 register_client, 
                 sectors_manager,
                 processes_count,
-                rid: 0,
+                rid: 0u64,
                 ts: HashMap::new(),
                 wr: HashMap::new(),
                 readlist: HashSet::new(),
                 acklist: HashSet::new(),
                 readval: empty_sector(),
                 writeval: empty_sector(),
-                val: empty_sector(),
                 reading: false,
                 writing: false,
                 write_phase: false,
@@ -123,7 +196,9 @@ pub mod atomic_register_public {
             }
         );
         // Recovery of rid
-        atomic_register.rid = atomic_register.metadata.get("rid").await.unwrap_or([0u8; 1].to_vec())[0];
+        atomic_register.rid = u64::from_be_bytes(
+            atomic_register.metadata.get("rid").await.unwrap_or([0u8; 1].to_vec())[..].try_into().unwrap()
+        );
         atomic_register
     }
 }
@@ -512,7 +587,6 @@ pub mod register_client_public {
     pub(crate) struct MyRegisterClient {
         pub(crate) hmac_system_key: [u8; 64],
         pub(crate) tcp_addrs: Vec<(String, u16)>,
-        // todo cachowanie wiadomości
     }
 
     #[async_trait::async_trait]
@@ -542,6 +616,7 @@ pub mod register_client_public {
             }
         }
 
+        // todo sprytniejsza logika do broadcasta (przesyłanie READ_PROC i WRITE_PROC wielokrotnie aż do ACK)
         async fn broadcast(&self, msg: Broadcast) {
             for target in 1..=self.tcp_addrs.len() {
                 self.send(Send {
