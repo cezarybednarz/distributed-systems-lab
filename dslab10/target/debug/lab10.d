@@ -1,0 +1,1 @@
+/home/cezary/Studia/DS/distributed-systems-lab/dslab10/target/debug/lab10: /home/cezary/Studia/DS/distributed-systems-lab/dsassignment1/solution/lib.rs /home/cezary/Studia/DS/distributed-systems-lab/dslab10/main.rs /home/cezary/Studia/DS/distributed-systems-lab/dslab10/public_test.rs /home/cezary/Studia/DS/distributed-systems-lab/dslab10/solution.rs
