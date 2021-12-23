@@ -3,8 +3,8 @@ mod utils;
 
 use std::sync::Arc;
 
-use log::error;
-use tokio::{sync::Mutex, net::TcpStream};
+use log::{error, info};
+use tokio::{sync::{Mutex, mpsc}, net::TcpStream};
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
@@ -22,7 +22,6 @@ type HmacSha256 = Hmac<Sha256>;
 // todo dodać '?' do awaitów i unwrapów
 pub async fn run_register_process(config: Configuration) {
     let processes_count = config.public.tcp_locations.len();
-
     // connect to TCP socket
     let mut tcp_stream = match TcpStream::connect(
         &config.public.tcp_locations[(config.public.self_rank - 1) as usize]
@@ -33,8 +32,7 @@ pub async fn run_register_process(config: Configuration) {
             return;
         }
     };
-    let (tcp_read_half, tcp_write_half) = tcp_stream.split();
-
+    let (mut tcp_read_half, mut tcp_write_half) = tcp_stream.split();
     // create the workers
     let mut workers: Vec<Arc<Mutex<Box<dyn AtomicRegister>>>> = Vec::new();
     for self_ident in 1..=(WORKERS_COUNT as u8) {
@@ -63,6 +61,53 @@ pub async fn run_register_process(config: Configuration) {
         workers.push(Arc::new(Mutex::new(atomic_register)));
     }  
 
+    // create channel for operation_complete callbacks
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    // run task for receiving tcp messages
+    tokio::spawn(async move {
+        loop {
+            let (command, hmac_valid) = match deserialize_register_command(
+                &mut tcp_read_half,
+                &config.hmac_system_key,
+                &config.hmac_client_key
+            ).await {
+                Ok(m) => m,
+                Err(err) => {
+                    error!("error in deserializing: {}", err);
+                    continue;
+                }
+            };
+            if !hmac_valid {
+                error!("invalid hmac key");
+                continue;
+            }
+            tokio::spawn( async move {
+                match command {
+                    RegisterCommand::System(_) => {
+                        error!("received system task");
+                        return;
+                    },
+                    RegisterCommand::Client(client_command) => {
+                        let worker_idx = client_command.header.sector_idx % WORKERS_COUNT;
+                        let worker = workers[worker_idx as usize].into_inner();
+                        let operation_complete = Box::new(|operation_complete| {
+                                Box::pin(async move {
+                                    if let Err(_) = tx.send(operation_complete) {
+                                        error!("receiver dropped");
+                                    }
+                                })
+                            }
+                        );
+                        worker.client_command(client_command, operation_complete);
+                    }
+                }
+            });
+        }        
+    });
+
+    // run task for sending tcp messages
+    // todo
 }
 
 pub mod atomic_register_public {
