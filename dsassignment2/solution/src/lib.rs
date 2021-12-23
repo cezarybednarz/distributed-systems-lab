@@ -1,6 +1,11 @@
 mod domain;
 mod utils;
 
+use std::sync::Arc;
+
+use log::error;
+use tokio::{sync::Mutex, net::TcpStream};
+
 pub use crate::domain::*;
 pub use atomic_register_public::*;
 use hmac::Hmac;
@@ -9,13 +14,55 @@ pub use sectors_manager_public::*;
 use sha2::Sha256;
 pub use stable_storage_public::*;
 pub use transfer_public::*;
+use utils::WORKERS_COUNT;
 
 type HmacSha256 = Hmac<Sha256>;
-
+// todo osobno folder na kazdy atomic register
+// todo nowa kolejka jeśli wysyłam do samego siebie
+// todo dodać '?' do awaitów i unwrapów
 pub async fn run_register_process(config: Configuration) {
-    // todo osobno folder na kazdy atomic register
-    // todo inicjalizować całe stable storage na 0 
-    unimplemented!()
+    let processes_count = config.public.tcp_locations.len();
+
+    // connect to TCP socket
+    let mut tcp_stream = match TcpStream::connect(
+        &config.public.tcp_locations[(config.public.self_rank - 1) as usize]
+    ).await {
+        Ok(t) => t,
+        Err(err) => {
+            error!("error connecting to TCP stream: {}", err);
+            return;
+        }
+    };
+    let (tcp_read_half, tcp_write_half) = tcp_stream.split();
+
+    // create the workers
+    let mut workers: Vec<Arc<Mutex<Box<dyn AtomicRegister>>>> = Vec::new();
+    for self_ident in 1..=(WORKERS_COUNT as u8) {
+        let mut stable_storage_path = config.public.storage_dir.clone();
+        stable_storage_path.push(self_ident.to_string());
+        // todo może napierw stworzyć ten folder
+        let metadata = Box::new(
+            MyStableStorage {
+                path: stable_storage_path.clone()
+            }
+        );
+        let register_client = Arc::new(
+            MyRegisterClient {
+                hmac_system_key: config.hmac_system_key,
+                tcp_addrs: config.public.tcp_locations.clone(),
+            }
+        );
+        let sectors_manager = build_sectors_manager(stable_storage_path);
+        let atomic_register = build_atomic_register(
+            self_ident,
+            metadata,
+            register_client,
+            sectors_manager,
+            processes_count
+        ).await;
+        workers.push(Arc::new(Mutex::new(atomic_register)));
+    }  
+
 }
 
 pub mod atomic_register_public {
@@ -458,6 +505,7 @@ pub mod sectors_manager_public {
     #[async_trait::async_trait] 
     impl SectorsManager for MySectorsManager {
         async fn read_data(&self, idx: SectorIdx) -> SectorVec {
+            // todo zwracanie [0; 4096] gdy nie ma danego klucza w storage
             let filename = get_filename_from_idx(idx);
             let data = self.stable_storage.get(&filename).await.unwrap();
             let data_bytes = &data[9..];
@@ -782,7 +830,7 @@ pub mod register_client_public {
     use log::error;
     use tokio::{net::TcpStream, io::AsyncWriteExt};
 
-    use crate::{SystemRegisterCommand, HmacSha256, RegisterCommand, serialize_register_command, SystemRegisterCommandContent};
+    use crate::{SystemRegisterCommand, RegisterCommand, serialize_register_command};
     use std::{sync::Arc, io::Write};
 
     #[async_trait::async_trait]
@@ -852,14 +900,11 @@ pub mod register_client_public {
 }
 
 
-// todo nieprzetestowane
 pub mod stable_storage_public {
     use core::num;
     use std::{path::PathBuf, collections::{HashMap, HashSet}, os::unix::prelude::OsStrExt, mem};
     use sha2::{Sha256, Digest};
     use tokio::{fs::{File, rename, read}, io::AsyncWriteExt};
-
-    use crate::utils::*;
 
     /// A helper trait for small amount of durable metadata needed by the register algorithm
     /// itself. Again, it is only for AtomicRegister definition. StableStorage in unit tests
