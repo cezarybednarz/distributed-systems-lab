@@ -3,8 +3,8 @@ mod utils;
 
 use std::sync::Arc;
 
-use log::{error};
-use tokio::{sync::{Mutex, mpsc}, net::TcpStream};
+use log::{error, debug};
+use tokio::{sync::{Mutex, mpsc}, net::{TcpStream, TcpListener}};
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
@@ -25,17 +25,17 @@ type HmacSha256 = Hmac<Sha256>;
 // todo dodać '?' do awaitów i unwrapów
 pub async fn run_register_process(config: Configuration) {
     let processes_count = config.public.tcp_locations.len();
-    // connect to TCP socket
-    let tcp_stream = match TcpStream::connect(
+
+    // create a TCP listener
+    let tcp_listener = match TcpListener::bind(
         &config.public.tcp_locations[(config.public.self_rank - 1) as usize]
     ).await {
-        Ok(t) => t,
+        Ok(l) => l,
         Err(err) => {
             error!("error connecting to TCP stream: {}", err);
             return;
         }
     };
-    let (mut tcp_read_half, mut tcp_write_half) = tcp_stream.into_split();
 
     // create the workers
     let mut workers: Vec<Arc<Mutex<Box<dyn AtomicRegister>>>> = Vec::new();
@@ -67,11 +67,26 @@ pub async fn run_register_process(config: Configuration) {
 
     // create channel for operation_complete callbacks
     let (tx, mut rx) = mpsc::unbounded_channel();
+
     // run task for receiving tcp messages
     let workers_clone = workers.clone();
     let tx_clone = tx.clone();
     tokio::spawn(async move {
         loop {
+            let tcp_stream = match tcp_listener.accept().await {
+                Ok((stream, socket)) => { 
+                    debug!("connecting to new client: {}", socket);
+                    stream
+                }
+                Err(e) => {
+                    error!("couldn't get client: {}", e);
+                    // todo maybe sleep?
+                    continue;
+                }
+            };
+            let (mut tcp_read_half, tcp_write_half) = tcp_stream.into_split();
+            
+            // deserialize command
             let (command, hmac_valid) = match deserialize_register_command(
                 &mut tcp_read_half,
                 &config.hmac_system_key,
@@ -87,6 +102,8 @@ pub async fn run_register_process(config: Configuration) {
                 error!("invalid hmac key");
                 continue;
             }
+
+            // send command to 
             let tx_clone = tx_clone.clone();
             let workers_clone = workers_clone.clone();
             tokio::spawn( async move {
@@ -100,13 +117,13 @@ pub async fn run_register_process(config: Configuration) {
                 let worker_idx = (client_command.header.sector_idx % WORKERS_COUNT) as usize;
                 let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
                 let mut worker_guard = mutex.lock().await;
-                let operation_complete:Box<
+                let operation_complete: Box<
                     dyn FnOnce(OperationComplete) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send>>
                         + core::marker::Send
                         + Sync,
                 > = Box::new(move |op_complete| {
                         Box::pin(async move {
-                            if let Err(_) = tx_clone.send(op_complete) {
+                            if let Err(_) = tx_clone.send((op_complete, tcp_write_half)) {
                                 error!("receiver dropped");
                             }
                         })
@@ -956,8 +973,7 @@ pub mod register_client_public {
 
 
 pub mod stable_storage_public {
-    use core::num;
-    use std::{path::PathBuf, collections::{HashMap, HashSet}, os::unix::prelude::OsStrExt, mem};
+    use std::{path::PathBuf};
     use sha2::{Sha256, Digest};
     use tokio::{fs::{File, rename, read}, io::AsyncWriteExt};
 
