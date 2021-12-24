@@ -4,7 +4,7 @@ mod utils;
 use std::sync::Arc;
 
 use log::{error, debug};
-use tokio::{sync::{Mutex, mpsc}, net::{TcpStream, TcpListener}};
+use tokio::{sync::{Mutex, mpsc}, net::TcpListener};
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
@@ -71,6 +71,7 @@ pub async fn run_register_process(config: Configuration) {
     // run task for receiving tcp messages
     let workers_clone = workers.clone();
     let tx_clone = tx.clone();
+    let hmac_client_key_clone= config.hmac_client_key.clone();
     tokio::spawn(async move {
         loop {
             let tcp_stream = match tcp_listener.accept().await {
@@ -84,13 +85,14 @@ pub async fn run_register_process(config: Configuration) {
                     continue;
                 }
             };
+            // todo może wrzucic to do środka taska (niżej)
             let (mut tcp_read_half, tcp_write_half) = tcp_stream.into_split();
             
             // deserialize command
             let (command, hmac_valid) = match deserialize_register_command(
                 &mut tcp_read_half,
                 &config.hmac_system_key,
-                &config.hmac_client_key
+                &hmac_client_key_clone
             ).await {
                 Ok(m) => m,
                 Err(err) => {
@@ -103,7 +105,7 @@ pub async fn run_register_process(config: Configuration) {
                 continue;
             }
 
-            // send command to 
+            // execute command at atomic register
             let tx_clone = tx_clone.clone();
             let workers_clone = workers_clone.clone();
             tokio::spawn( async move {
@@ -123,7 +125,7 @@ pub async fn run_register_process(config: Configuration) {
                         + Sync,
                 > = Box::new(move |op_complete| {
                         Box::pin(async move {
-                            if let Err(_) = tx_clone.send((op_complete, tcp_write_half)) {
+                            if let Err(_) = tx_clone.send((op_complete, Arc::new(Mutex::new(tcp_write_half)))) {
                                 error!("receiver dropped");
                             }
                         })
@@ -133,8 +135,34 @@ pub async fn run_register_process(config: Configuration) {
             });
         }        
     });
+    // run task for sending tcp messages to client
+    tokio::spawn(async move {
+        loop {
+            let (operation_complete, tcp_write_half) = match rx.recv().await {
+                Some(pair) => pair,
+                None => {
+                    error!("all senders dropped");
+                    return;
+                }
+            };
+            // todo wrzucić to do taska (niżej)
+            let mutex = Arc::try_unwrap(tcp_write_half).unwrap();
+            let mut tcp_write_half = mutex.into_inner();
+            match serialize_operation_complete_command(
+                &operation_complete,
+                &mut tcp_write_half,
+                &hmac_client_key_clone,
 
-    // run task for sending tcp messages
+            ).await {
+                Ok(()) => {
+                    debug!("sent message to client");
+                }
+                Err(err) => {
+                    error!("error in serializing and sending message: {}", err);
+                }
+            }
+        }
+    });
 }
 
 pub mod atomic_register_public {
