@@ -3,7 +3,7 @@ mod utils;
 
 use std::sync::Arc;
 
-use log::{error, info};
+use log::{error};
 use tokio::{sync::{Mutex, mpsc}, net::TcpStream};
 
 pub use crate::domain::*;
@@ -17,13 +17,16 @@ pub use transfer_public::*;
 use utils::WORKERS_COUNT;
 
 type HmacSha256 = Hmac<Sha256>;
-// todo osobno folder na kazdy atomic register
+// todo trzymanie w nazwie metadanych i trzymanie ich w hashmapie z rwlockiem
+// todo odsmiecanie plikow tem przy zapisach (w trakcie recovery)
+// todo trzymanie wszystkiego w jednym folderze
+// todo jakies sprytniejsze trzymanie rid zeby sie miescilo w pamieci
 // todo nowa kolejka jeśli wysyłam do samego siebie
 // todo dodać '?' do awaitów i unwrapów
 pub async fn run_register_process(config: Configuration) {
     let processes_count = config.public.tcp_locations.len();
     // connect to TCP socket
-    let mut tcp_stream = match TcpStream::connect(
+    let tcp_stream = match TcpStream::connect(
         &config.public.tcp_locations[(config.public.self_rank - 1) as usize]
     ).await {
         Ok(t) => t,
@@ -32,7 +35,8 @@ pub async fn run_register_process(config: Configuration) {
             return;
         }
     };
-    let (mut tcp_read_half, mut tcp_write_half) = tcp_stream.split();
+    let (mut tcp_read_half, mut tcp_write_half) = tcp_stream.into_split();
+
     // create the workers
     let mut workers: Vec<Arc<Mutex<Box<dyn AtomicRegister>>>> = Vec::new();
     for self_ident in 1..=(WORKERS_COUNT as u8) {
@@ -59,12 +63,13 @@ pub async fn run_register_process(config: Configuration) {
             processes_count
         ).await;
         workers.push(Arc::new(Mutex::new(atomic_register)));
-    }  
+    }      
 
     // create channel for operation_complete callbacks
     let (tx, mut rx) = mpsc::unbounded_channel();
-
     // run task for receiving tcp messages
+    let workers_clone = workers.clone();
+    let tx_clone = tx.clone();
     tokio::spawn(async move {
         loop {
             let (command, hmac_valid) = match deserialize_register_command(
@@ -82,32 +87,37 @@ pub async fn run_register_process(config: Configuration) {
                 error!("invalid hmac key");
                 continue;
             }
+            let tx_clone = tx_clone.clone();
+            let workers_clone = workers_clone.clone();
             tokio::spawn( async move {
-                match command {
+                let client_command = match command {
                     RegisterCommand::System(_) => {
                         error!("received system task");
                         return;
                     },
-                    RegisterCommand::Client(client_command) => {
-                        let worker_idx = client_command.header.sector_idx % WORKERS_COUNT;
-                        let worker = workers[worker_idx as usize].into_inner();
-                        let operation_complete = Box::new(|operation_complete| {
-                                Box::pin(async move {
-                                    if let Err(_) = tx.send(operation_complete) {
-                                        error!("receiver dropped");
-                                    }
-                                })
+                    RegisterCommand::Client(c) => c
+                };
+                let worker_idx = (client_command.header.sector_idx % WORKERS_COUNT) as usize;
+                let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
+                let mut worker_guard = mutex.lock().await;
+                let operation_complete:Box<
+                    dyn FnOnce(OperationComplete) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send>>
+                        + core::marker::Send
+                        + Sync,
+                > = Box::new(move |op_complete| {
+                        Box::pin(async move {
+                            if let Err(_) = tx_clone.send(op_complete) {
+                                error!("receiver dropped");
                             }
-                        );
-                        worker.client_command(client_command, operation_complete);
+                        })
                     }
-                }
+                );
+                worker_guard.client_command(client_command, operation_complete).await;
             });
         }        
     });
 
     // run task for sending tcp messages
-    // todo
 }
 
 pub mod atomic_register_public {
