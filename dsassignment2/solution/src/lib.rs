@@ -42,7 +42,7 @@ pub async fn run_register_process(config: Configuration) {
     for self_ident in 1..=(WORKERS_COUNT as u8) {
         let mut stable_storage_path = config.public.storage_dir.clone();
         stable_storage_path.push(self_ident.to_string());
-        // todo może napierw stworzyć ten folder
+        tokio::fs::create_dir(stable_storage_path.clone()).await.unwrap();
         let metadata = Box::new(
             MyStableStorage {
                 path: stable_storage_path.clone()
@@ -109,29 +109,34 @@ pub async fn run_register_process(config: Configuration) {
             let tx_clone = tx_clone.clone();
             let workers_clone = workers_clone.clone();
             tokio::spawn( async move {
-                let client_command = match command {
-                    RegisterCommand::System(_) => {
-                        error!("received system task");
-                        return;
+                match command {
+                    RegisterCommand::System(system_command) => {
+                        log::debug!("received system command");
+                        let worker_idx = (system_command.header.sector_idx % WORKERS_COUNT) as usize;
+                        let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
+                        let mut worker_guard = mutex.lock().await;
+                        worker_guard.system_command(system_command).await;
                     },
-                    RegisterCommand::Client(c) => c
-                };
-                let worker_idx = (client_command.header.sector_idx % WORKERS_COUNT) as usize;
-                let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
-                let mut worker_guard = mutex.lock().await;
-                let operation_complete: Box<
-                    dyn FnOnce(OperationComplete) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send>>
-                        + core::marker::Send
-                        + Sync,
-                > = Box::new(move |op_complete| {
-                        Box::pin(async move {
-                            if let Err(_) = tx_clone.send((op_complete, Arc::new(Mutex::new(tcp_write_half)))) {
-                                error!("receiver dropped");
+                    RegisterCommand::Client(client_command) => {
+                        log::debug!("received client command");
+                        let worker_idx = (client_command.header.sector_idx % WORKERS_COUNT) as usize;
+                        let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
+                        let mut worker_guard = mutex.lock().await;
+                        let operation_complete: Box<
+                            dyn FnOnce(OperationComplete) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send>>
+                                + core::marker::Send
+                                + Sync,
+                        > = Box::new(move |op_complete| {
+                                Box::pin(async move {
+                                    if let Err(_) = tx_clone.send((op_complete, Arc::new(Mutex::new(tcp_write_half)))) {
+                                        error!("receiver dropped");
+                                    }
+                                })
                             }
-                        })
+                        );
+                        worker_guard.client_command(client_command, operation_complete).await;
                     }
-                );
-                worker_guard.client_command(client_command, operation_complete).await;
+                };
             });
         }        
     });
@@ -569,7 +574,7 @@ pub mod sectors_manager_public {
 
     use log::error;
 
-    use crate::utils::{get_filename_from_idx};
+    use crate::utils::{get_filename_from_idx, empty_sector, PAGE_SIZE};
     use crate::{SectorIdx, SectorVec, MyStableStorage, StableStorage};
     use std::convert::TryInto;
     use std::path::PathBuf;
@@ -605,9 +610,15 @@ pub mod sectors_manager_public {
     #[async_trait::async_trait] 
     impl SectorsManager for MySectorsManager {
         async fn read_data(&self, idx: SectorIdx) -> SectorVec {
-            // todo zwracanie [0; 4096] gdy nie ma danego klucza w storage
             let filename = get_filename_from_idx(idx);
-            let data = self.stable_storage.get(&filename).await.unwrap();
+            let data = match self.stable_storage.get(&filename).await {
+                None => {
+                    log::debug!("no data in stable storage, filling with 0");
+                    self.stable_storage.put_non_mut(&filename, &[0; 4096 + 9]).await.unwrap();
+                    vec![0; 4096 + 9]
+                }
+                Some(d) => d
+            };
             let data_bytes = &data[9..];
             SectorVec(data_bytes.to_vec())
         }
@@ -616,8 +627,9 @@ pub mod sectors_manager_public {
             let filename = get_filename_from_idx(idx);
             let data = match self.stable_storage.get(&filename).await {
                 None => {
-                    error!("no metadata in stable storage, returning (0, 0)");
-                    return (0, 0);
+                    log::debug!("no metadata in stable storage, filling with 0");
+                    self.stable_storage.put_non_mut(&filename, &[0; 4096 + 9]).await.unwrap();
+                    vec![0; 4096 + 9]
                 },
                 Some(d) => d
             };
