@@ -212,6 +212,7 @@ pub mod atomic_register_public {
             >,
         ) {
             let sector_idx = cmd.header.sector_idx;
+            self.request_identifier = cmd.header.request_identifier;
             self.recover_sector(sector_idx).await;
             self.operation_complete = Some(operation_complete);
             match cmd.content {
@@ -288,6 +289,7 @@ pub mod atomic_register_public {
                 // upon event < sbeb, Deliver | p [READ_PROC, r] > do
                 //     trigger < sl, Send | p, [VALUE, r, ts, wr, val] >;
                 SystemRegisterCommandContent::ReadProc => {
+                    log::debug!("READ_PROC: r = {}", r);
                     let ts = self.ts.get(&sector_idx).unwrap();
                     let wr = self.wr.get(&sector_idx).unwrap();
                     let val = self.sectors_manager.read_data(sector_idx).await;
@@ -441,7 +443,7 @@ pub mod atomic_register_public {
                                     callback(
                                         OperationComplete {
                                             status_code: StatusCode::Ok,
-                                            request_identifier: self.rid, 
+                                            request_identifier: self.request_identifier, 
                                             op_return: OperationReturn::Read(
                                                 ReadReturn {
                                                     read_data: Some(self.readval.clone())
@@ -461,7 +463,7 @@ pub mod atomic_register_public {
                                     callback(
                                         OperationComplete {
                                             status_code: StatusCode::Ok,
-                                            request_identifier: self.rid, 
+                                            request_identifier: self.request_identifier, 
                                             op_return: OperationReturn::Write,
                                         }
                                     ).await;
@@ -527,6 +529,7 @@ pub mod atomic_register_public {
                     + Sync,
             >
         >,
+        request_identifier: u64,
     }
 
     /// Idents are numbered starting at 1 (up to the number of processes in the system).
@@ -560,6 +563,7 @@ pub mod atomic_register_public {
                 write_phase: false,
                 recovered_sectors: HashSet::new(),
                 operation_complete: None,
+                request_identifier: 0u64,
             }
         );
         // Recovery of rid
@@ -572,9 +576,8 @@ pub mod atomic_register_public {
 
 pub mod sectors_manager_public {
 
-    use log::error;
 
-    use crate::utils::{get_filename_from_idx, empty_sector, PAGE_SIZE};
+    use crate::utils::{get_filename_from_idx};
     use crate::{SectorIdx, SectorVec, MyStableStorage, StableStorage};
     use std::convert::TryInto;
     use std::path::PathBuf;
