@@ -109,8 +109,10 @@ impl TestProcessesConfig {
     }
 
     pub async fn read_response(&self, stream: &mut TcpStream) -> Result<RegisterResponse, String> {
+        log::info!("starting");
         let mut buf = [0; 8];
         stream.read_exact(&mut buf).await.unwrap();
+        log::info!("after reading first 8 bytes");
         if &buf[0..4] != MAGIC_NUMBER.as_ref() {
             return Err("Invalid magic number".to_string());
         }

@@ -23,8 +23,12 @@ type HmacSha256 = Hmac<Sha256>;
 // todo jakies sprytniejsze trzymanie rid zeby sie miescilo w pamieci
 // todo nowa kolejka jeśli wysyłam do samego siebie
 // todo dodać '?' do awaitów i unwrapów
+// todo ReadBuf i WriteBuf jako wrapper do readhalf i writehalf
 pub async fn run_register_process(config: Configuration) {
     let processes_count = config.public.tcp_locations.len();
+    for tcp_location in config.public.tcp_locations.clone() {
+        log::debug!("tcp_location from config: {}:{}", tcp_location.0, tcp_location.1);
+    }
 
     // create a TCP listener
     let tcp_listener = match TcpListener::bind(
@@ -74,6 +78,7 @@ pub async fn run_register_process(config: Configuration) {
     let hmac_client_key_clone= config.hmac_client_key.clone();
     tokio::spawn(async move {
         loop {
+            log::debug!("waiting for tcp data to come in");
             let tcp_stream = match tcp_listener.accept().await {
                 Ok((stream, socket)) => { 
                     debug!("connecting to new client: {}", socket);
@@ -88,6 +93,7 @@ pub async fn run_register_process(config: Configuration) {
             // todo może wrzucic to do środka taska (niżej)
             let (mut tcp_read_half, tcp_write_half) = tcp_stream.into_split();
             
+            log::debug!("trying to deserialize command...");
             // deserialize command
             let (command, hmac_valid) = match deserialize_register_command(
                 &mut tcp_read_half,
@@ -104,7 +110,7 @@ pub async fn run_register_process(config: Configuration) {
                 error!("invalid hmac key");
                 continue;
             }
-
+            log::debug!("deserialized command!");
             // execute command at atomic register
             let tx_clone = tx_clone.clone();
             let workers_clone = workers_clone.clone();
@@ -116,6 +122,7 @@ pub async fn run_register_process(config: Configuration) {
                         let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
                         let mut worker_guard = mutex.lock().await;
                         worker_guard.system_command(system_command).await;
+                        drop(worker_guard);
                     },
                     RegisterCommand::Client(client_command) => {
                         log::debug!("received client command");
@@ -135,14 +142,18 @@ pub async fn run_register_process(config: Configuration) {
                             }
                         );
                         worker_guard.client_command(client_command, operation_complete).await;
+                        drop(worker_guard);
+                        log::debug!("after sending client command to worker guard");
                     }
                 };
             });
+            log::info!("spawned task, waiting for next message");
         }        
     });
     // run task for sending tcp messages to client
     tokio::spawn(async move {
         loop {
+            log::debug!("getting operation complete from mpsc queue");
             let (operation_complete, tcp_write_half) = match rx.recv().await {
                 Some(pair) => pair,
                 None => {
@@ -150,6 +161,7 @@ pub async fn run_register_process(config: Configuration) {
                     return;
                 }
             };
+            log::debug!("got operation complete from mpsc queue, request_identifier: {}",operation_complete.request_identifier);
             // todo wrzucić to do taska (niżej)
             let mutex = Arc::try_unwrap(tcp_write_half).unwrap();
             let mut tcp_write_half = mutex.into_inner();
@@ -224,6 +236,7 @@ pub mod atomic_register_public {
                 //     reading := TRUE;
                 //     trigger < sbeb, Broadcast | [READ_PROC, rid] >;
                 ClientRegisterCommandContent::Read => {
+                    log::info!("Read, request_identifier: {}", self.request_identifier);
                     self.rid += 1;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
                     self.readlist = HashMap::new();
@@ -254,12 +267,14 @@ pub mod atomic_register_public {
                 //     store(rid);
                 //     trigger < sbeb, Broadcast | [READ_PROC, rid] >;
                 ClientRegisterCommandContent::Write {data} => {
+                    log::info!("Write, request_identifier: {}", self.request_identifier);
                     self.rid += 1;
                     self.writeval = data;
                     self.acklist = HashSet::new();
                     self.readlist = HashMap::new();
                     self.writing = true;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
+                    log::info!("Write, broadcasting ReadProc");
                     self.register_client.broadcast(
                         register_client_public::Broadcast {
                             cmd: Arc::new(
@@ -289,7 +304,7 @@ pub mod atomic_register_public {
                 // upon event < sbeb, Deliver | p [READ_PROC, r] > do
                 //     trigger < sl, Send | p, [VALUE, r, ts, wr, val] >;
                 SystemRegisterCommandContent::ReadProc => {
-                    log::debug!("READ_PROC: r = {}", r);
+                    log::info!("ReadProc: r = {}", r);
                     let ts = self.ts.get(&sector_idx).unwrap();
                     let wr = self.wr.get(&sector_idx).unwrap();
                     let val = self.sectors_manager.read_data(sector_idx).await;
@@ -329,6 +344,7 @@ pub mod atomic_register_public {
                 //             store(ts, wr, val);
                 //             trigger < sbeb, Broadcast | [WRITE_PROC, rid, maxts + 1, rank(self), writeval] >;
                 SystemRegisterCommandContent::Value { timestamp, write_rank, sector_data } => {
+                    log::info!("Value");
                     if r == self.rid && !self.write_phase {
                         self.readlist.insert(q, (timestamp, write_rank, sector_data));
                         if self.readlist.len() > self.processes_count / 2 {
@@ -396,6 +412,7 @@ pub mod atomic_register_public {
                 //         store(ts, wr, val);
                 //     trigger < sl, Send | p, [ACK, r] >;
                 SystemRegisterCommandContent::WriteProc { timestamp, write_rank, data_to_write } => {
+                    log::info!("WriteProc");
                     let ts = self.ts.get(&sector_idx).unwrap();
                     let wr = self.wr.get(&sector_idx).unwrap();
                     if (timestamp, write_rank) > (*ts, *wr) {
@@ -432,6 +449,7 @@ pub mod atomic_register_public {
                 //             writing := FALSE;
                 //             trigger < nnar, WriteReturn >;
                 SystemRegisterCommandContent::Ack => {
+                    log::info!("Ack");
                     if r == self.rid && self.write_phase {
                         self.acklist.insert(q);
                         if self.acklist.len() > self.processes_count / 2 && (self.reading || self.writing) {
@@ -440,6 +458,7 @@ pub mod atomic_register_public {
                             if self.reading {
                                 self.reading = false;
                                 if let Some(callback) = self.operation_complete.take() {
+                                    log::debug!("Sending OperationComplete, request_identifier: {}", self.request_identifier);
                                     callback(
                                         OperationComplete {
                                             status_code: StatusCode::Ok,
@@ -458,6 +477,7 @@ pub mod atomic_register_public {
                                 }
                             }
                             else {
+                                log::debug!("calling callback!!!");
                                 self.writing = false;
                                 if let Some(callback) = self.operation_complete.take() {
                                     callback(
@@ -673,15 +693,19 @@ pub mod transfer_public {
         hmac_system_key: &[u8; 64],
         hmac_client_key: &[u8; 32],
     ) -> Result<(RegisterCommand, bool), Error> {
+        log::debug!("starting to deserialize command");
         // slide over bytes until MAGIC_NUMBER appears
         let mut magic_buffer = vec![0; 4];
         data.read_exact(&mut magic_buffer).await?;
+        log::debug!("after reading first 4 bytes");
         while magic_buffer != MAGIC_NUMBER {
+            println!("{} {} {} {}", magic_buffer[0], magic_buffer[1], magic_buffer[2], magic_buffer[3] );
             let mut magic_byte = vec![0; 1];
             data.read_exact(&mut magic_byte).await?;
             magic_buffer = [magic_buffer, magic_byte].concat();
             magic_buffer.remove(0);
         }
+        log::debug!("found magic buffer!");
         // check message type
         let mut type_buffer = vec![0; 4];
         data.read_exact(&mut type_buffer).await?;
@@ -902,6 +926,7 @@ pub mod transfer_public {
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), Error> {
+        log::info!("starting serializing");
         let mut buf = BytesMut::new();
         buf.put_slice(&MAGIC_NUMBER);
         buf.put_slice(&[0; 2]);
@@ -936,6 +961,7 @@ pub mod transfer_public {
         let result = mac.finalize().into_bytes();
         buf.put_slice(&result);
         // send the message
+        log::debug!("writing serialized message");
         return writer.write_all(&buf).await;
     }
 }
@@ -978,6 +1004,7 @@ pub mod register_client_public {
     #[async_trait::async_trait]
     impl RegisterClient for MyRegisterClient {
         async fn send(&self, msg: Send) {
+            log::debug!("sending command to target: {}", msg.target);
             let mut writer = vec![];
             match serialize_register_command(
                 &RegisterCommand::System((&*msg.cmd).clone()),
@@ -985,11 +1012,20 @@ pub mod register_client_public {
                 &self.hmac_system_key,
             ).await {
                 Ok(_) => {
+                    log::debug!("sending to socket");
                     let addr = self.tcp_addrs.get(msg.target-1).unwrap();
                     let stream = TcpStream::connect(addr).await;
                     match stream {
                         Ok(mut socket) => {
-                            socket.write_all(writer.as_slice()).await.ok();
+                            log::debug!("sending bytes of len = {}", writer.len());
+                            match socket.write_all(writer.as_slice()).await {
+                                Ok(_) => {
+                                    log::debug!("successfully writing to socket: {}:{}", addr.0, addr.1);
+                                }
+                                Err(err) => {
+                                    log::error!("error while write_all to socket: {}", err);
+                                }
+                            };
                         }
                         Err(err) => {
                             error!("send(): couln't send to socket: {}", err);
