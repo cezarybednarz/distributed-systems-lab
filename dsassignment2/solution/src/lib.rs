@@ -1,7 +1,7 @@
 mod domain;
 mod utils;
 
-use std::sync::Arc;
+use std::{sync::Arc, collections::VecDeque};
 
 use log::{error, debug};
 use tokio::{sync::{Mutex, mpsc::{self, UnboundedReceiver, UnboundedSender}}, net::TcpListener};
@@ -44,13 +44,18 @@ pub async fn run_register_process(config: Configuration) {
         }
     };
 
-    // creating atomic registers and receiving messages from queue and then processing them
+    // create vector of queues for worker messages
     let mut workers_senders = Vec::new();
-    for self_ident in 1..=(WORKERS_COUNT as u8) {
+    let mut workers_receivers = VecDeque::new();
+    for _ in 0..(WORKERS_COUNT) {
         // create queue for messages
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         workers_senders.push(tx);
+        workers_receivers.push_back(rx);
+    }
 
+    // create atomic registers vector
+    for self_ident in 1..=(WORKERS_COUNT as u8) {
         // create atomic register
         let mut stable_storage_path = config.public.storage_dir.clone();
         stable_storage_path.push(self_ident.to_string());
@@ -64,6 +69,8 @@ pub async fn run_register_process(config: Configuration) {
             MyRegisterClient {
                 hmac_system_key: config.hmac_system_key,
                 tcp_addrs: config.public.tcp_locations.clone(),
+                self_id: self_ident,
+                workers_senders: workers_senders.clone(),
             }
         );
         let sectors_manager = build_sectors_manager(stable_storage_path);
@@ -74,6 +81,8 @@ pub async fn run_register_process(config: Configuration) {
             sectors_manager,
             processes_count
         ).await;
+        // get receiver
+        let mut rx = workers_receivers.pop_front().unwrap();
         // spawn task for receiving messages
         tokio::spawn(async move {
             // receive and process commands from queue in loop
@@ -98,8 +107,8 @@ pub async fn run_register_process(config: Configuration) {
                     RegisterCommand::Client(client_command) => {
                         log::debug!("received client command from queue");
                         let mut tcp_write_half = match client_addr {
-                            Some(t) => {
-                                t
+                            Some(w) => {
+                                w
                             }
                             None => {
                                 error!("no tcp address to client in message");
@@ -112,7 +121,6 @@ pub async fn run_register_process(config: Configuration) {
                                 + Sync,
                         > = Box::new(move |op_complete| {
                                 Box::pin(async move {
-                                    // todo dodac opcje wysylania na kanal w register client
                                     match serialize_operation_complete_command(
                                         &op_complete,
                                         &mut tcp_write_half,
@@ -982,7 +990,7 @@ pub mod transfer_public {
 
 
 pub mod register_client_public {
-    use tokio::{net::TcpStream, io::AsyncWriteExt};
+    use tokio::{net::{TcpStream, tcp::OwnedWriteHalf}, io::AsyncWriteExt, sync::mpsc::UnboundedSender};
 
     use crate::{SystemRegisterCommand, RegisterCommand, serialize_register_command};
     use std::{sync::Arc, io::Write};
@@ -1012,41 +1020,63 @@ pub mod register_client_public {
     pub(crate) struct MyRegisterClient {
         pub(crate) hmac_system_key: [u8; 64],
         pub(crate) tcp_addrs: Vec<(String, u16)>,
+        pub(crate) self_id: u8,
+        pub(crate) workers_senders: Vec<UnboundedSender<(RegisterCommand, Option<OwnedWriteHalf>)>>,
     }
 
     #[async_trait::async_trait]
     impl RegisterClient for MyRegisterClient {
         async fn send(&self, msg: Send) {
             log::debug!("sending command to target: {}", msg.target);
-            let mut writer = vec![];
-            match serialize_register_command(
-                &RegisterCommand::System((&*msg.cmd).clone()),
-                writer.by_ref(), 
-                &self.hmac_system_key,
-            ).await {
-                Ok(_) => {
-                    let addr = self.tcp_addrs.get(msg.target-1).unwrap();
-                    let stream = TcpStream::connect(addr).await;
-                    match stream {
-                        Ok(mut socket) => {
-                            log::debug!("sending bytes of len = {}", writer.len());
-                            match socket.write_all(writer.as_slice()).await {
-                                Ok(_) => {
-                                    log::warn!("{:?}", socket);
-                                    log::warn!("successfully writing to socket: {}:{}", addr.0, addr.1);
-                                }
-                                Err(err) => {
-                                    log::error!("error while write_all to socket: {}", err);
-                                }
-                            };
-                        }
-                        Err(err) => {
-                            log::error!("send(): couln't send to socket: {}", err);
-                        }
+            if self.self_id as usize == msg.target {
+                // send message to self by queue without serialization
+                log::debug!("send message to self ({}) with queue", msg.target);
+                let tx = &self.workers_senders[(self.self_id - 1) as usize];
+                let command = &*msg.cmd;
+                let command_clone = RegisterCommand::System(command.clone());
+                match tx.send((command_clone, None)) {
+                    Ok(_) => {
+                        log::debug!("successfully sent msg to worker: {}", self.self_id);
+                    }
+                    Err(err) => {
+                        log::error!("error in rx.send: {}", err);
                     }
                 }
-                Err(err) => {
-                    log::error!("error during send() to target {} in serializing: {}", msg.target, err);
+            }
+            else {
+                // send message to other process with serialization
+                let mut writer = vec![];
+                match serialize_register_command(
+                    &RegisterCommand::System((&*msg.cmd).clone()),
+                    writer.by_ref(), 
+                    &self.hmac_system_key,
+                ).await {
+                    Ok(_) => {
+                        log::debug!("sending message to {} with tcp", msg.target);
+                        let addr = self.tcp_addrs.get(msg.target-1).unwrap();
+                        let stream = TcpStream::connect(addr).await;
+                        match stream {
+                            Ok(mut socket) => {
+                                log::debug!("sending bytes of len = {}", writer.len());
+                                match socket.write_all(writer.as_slice()).await {
+                                    Ok(_) => {
+                                        log::warn!("{:?}", socket);
+                                        log::warn!("successfully writing to socket: {}:{}", addr.0, addr.1);
+                                    }
+                                    Err(err) => {
+                                        log::error!("error while write_all to socket: {}", err);
+                                    }
+                                };
+                            }
+                            Err(err) => {
+                                log::error!("send(): couln't send to socket: {}", err);
+                            }
+                        }
+                    
+                    }
+                    Err(err) => {
+                        log::error!("error during send() to target {} in serializing: {}", msg.target, err);
+                    }
                 }
             }
         }
