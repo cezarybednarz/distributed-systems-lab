@@ -4,7 +4,7 @@ mod utils;
 use std::sync::Arc;
 
 use log::{error, debug};
-use tokio::{sync::{Mutex, mpsc}, net::TcpListener};
+use tokio::{sync::{Mutex, mpsc::{self, UnboundedReceiver, UnboundedSender}}, net::TcpListener};
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
@@ -22,10 +22,13 @@ type HmacSha256 = Hmac<Sha256>;
 // todo trzymanie wszystkiego w jednym folderze
 // todo jakies sprytniejsze trzymanie rid zeby sie miescilo w pamieci
 // todo nowa kolejka jeśli wysyłam do samego siebie
-// todo dodać '?' do awaitów i unwrapów
+// todo dodać '?' do awaitów i unwrapów / pousuwac panici
 // todo ReadBuf i WriteBuf jako wrapper do readhalf i writehalf
+
 pub async fn run_register_process(config: Configuration) {
     let processes_count = config.public.tcp_locations.len();
+    let hmac_client_key_clone= config.hmac_client_key.clone();
+
     for tcp_location in config.public.tcp_locations.clone() {
         log::debug!("tcp_location from config: {}:{}", tcp_location.0, tcp_location.1);
     }
@@ -41,9 +44,14 @@ pub async fn run_register_process(config: Configuration) {
         }
     };
 
-    // create the workers
-    let mut workers: Vec<Arc<Mutex<Box<dyn AtomicRegister>>>> = Vec::new();
+    // creating atomic registers and receiving messages from queue and then processing them
+    let mut workers_senders = Vec::new();
     for self_ident in 1..=(WORKERS_COUNT as u8) {
+        // create queue for messages
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        workers_senders.push(tx);
+
+        // create atomic register
         let mut stable_storage_path = config.public.storage_dir.clone();
         stable_storage_path.push(self_ident.to_string());
         tokio::fs::create_dir(stable_storage_path.clone()).await.unwrap();
@@ -59,38 +67,88 @@ pub async fn run_register_process(config: Configuration) {
             }
         );
         let sectors_manager = build_sectors_manager(stable_storage_path);
-        let atomic_register = build_atomic_register(
+        let mut atomic_register = build_atomic_register(
             self_ident,
             metadata,
             register_client,
             sectors_manager,
             processes_count
         ).await;
-        workers.push(Arc::new(Mutex::new(atomic_register)));
-    }      
+        // spawn task for receiving messages
+        tokio::spawn(async move {
+            // receive and process commands from queue in loop
+            loop {
+                // receive command from queue
+                let (command, client_addr) = match rx.recv().await {
+                    Some(c) => {
+                        log::debug!("received command from queue");
+                        c
+                    }
+                    None => {
+                        log::error!("error in receiving command from queue");
+                        continue;
+                    }
+                };
 
-    // create channel for operation_complete callbacks
-    let (tx, mut rx) = mpsc::unbounded_channel();
+                match command {
+                    RegisterCommand::System(system_command) => {
+                        log::debug!("received system command from queue");
+                        atomic_register.system_command(system_command).await;
+                    },
+                    RegisterCommand::Client(client_command) => {
+                        log::debug!("received client command from queue");
+                        let mut tcp_write_half = match client_addr {
+                            Some(t) => {
+                                t
+                            }
+                            None => {
+                                error!("no tcp address to client in message");
+                                continue;
+                            }
+                        };
+                        let operation_complete: Box<
+                            dyn FnOnce(OperationComplete) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send>>
+                                + core::marker::Send
+                                + Sync,
+                        > = Box::new(move |op_complete| {
+                                Box::pin(async move {
+                                    // todo dodac opcje wysylania na kanal w register client
+                                    match serialize_operation_complete_command(
+                                        &op_complete,
+                                        &mut tcp_write_half,
+                                        &hmac_client_key_clone.clone(),
+                                    ).await {
+                                        Ok(_) => {
+                                            log::debug!("successfully written operation_complete to client");
+                                        }
+                                        Err(err) => {
+                                            log::error!("error in serializing operation_complete: {}", err);
+                                        }
+                                    }
+                                })
+                            }
+                        );
+                        atomic_register.client_command(client_command, operation_complete).await;
+                    }
+                };
+            }
+        });
+    }
 
     // run task for receiving tcp messages
-    let workers_clone = workers.clone();
-    let tx_clone = tx.clone();
-    let hmac_client_key_clone= config.hmac_client_key.clone();
     tokio::spawn(async move {
         loop {
-            log::debug!("waiting for tcp data to come in");
-            let tcp_stream = match tcp_listener.accept().await {
-                Ok((stream, socket)) => { 
-                    debug!("connecting to new client: {}", socket);
-                    stream
+            log::debug!("waiting for data to come in");
+            let (tcp_stream, _socket_addr) = match tcp_listener.accept().await {
+                Ok(accept_value) => { 
+                    debug!("connecting to new client: {:?}", accept_value);
+                    accept_value
                 }
-                Err(e) => {
-                    error!("couldn't get client: {}", e);
-                    // todo maybe sleep?
+                Err(err) => {
+                    error!("couldn't get client: {}", err);
                     continue;
                 }
             };
-            // todo może wrzucic to do środka taska (niżej)
             let (mut tcp_read_half, tcp_write_half) = tcp_stream.into_split();
             log::warn!("tcp_write_half: {:?}", tcp_write_half);
             
@@ -111,76 +169,30 @@ pub async fn run_register_process(config: Configuration) {
                 error!("invalid hmac key");
                 continue;
             }
-            log::debug!("deserialized command!");
-            // execute command at atomic register
-            let tx_clone = tx_clone.clone();
-            let workers_clone = workers_clone.clone();
-            tokio::spawn( async move {
-                match command {
-                    RegisterCommand::System(system_command) => {
-                        log::debug!("received system command");
-                        let worker_idx = (system_command.header.sector_idx % WORKERS_COUNT) as usize;
-                        let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
-                        let mut worker_guard = mutex.lock().await;
-                        worker_guard.system_command(system_command).await;
-                        drop(worker_guard);
-                    },
-                    RegisterCommand::Client(client_command) => {
-                        log::debug!("received client command");
-                        let worker_idx = (client_command.header.sector_idx % WORKERS_COUNT) as usize;
-                        let mutex = Arc::clone(workers_clone.get(worker_idx).unwrap());
-                        let mut worker_guard = mutex.lock().await;
-                        let operation_complete: Box<
-                            dyn FnOnce(OperationComplete) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send>>
-                                + core::marker::Send
-                                + Sync,
-                        > = Box::new(move |op_complete| {
-                                Box::pin(async move {
-                                    if let Err(_) = tx_clone.send((op_complete, Arc::new(Mutex::new(tcp_write_half)))) {
-                                        error!("receiver dropped");
-                                    }
-                                })
-                            }
-                        );
-                        worker_guard.client_command(client_command, operation_complete).await;
-                        drop(worker_guard);
-                        log::debug!("after sending client command to worker guard");
-                    }
-                };
-            });
-            log::info!("spawned task, waiting for next message");
-        }        
-    });
-    // run task for sending tcp messages to client
-    tokio::spawn(async move {
-        loop {
-            log::debug!("getting operation complete from mpsc queue");
-            let (operation_complete, tcp_write_half) = match rx.recv().await {
-                Some(pair) => pair,
-                None => {
-                    error!("all senders dropped");
-                    return;
+
+            // process command
+            let (worker_id, client_addr) = match command.clone() {
+                RegisterCommand::System(system_command) => {
+                    log::debug!("tcp_received {:?}", system_command);
+                    ((system_command.header.sector_idx % WORKERS_COUNT) as usize, None)
+                },
+                RegisterCommand::Client(client_command) => {
+                    log::debug!("tcp received {:?}", client_command);
+                    ((client_command.header.sector_idx % WORKERS_COUNT) as usize, Some(tcp_write_half))
                 }
             };
-            log::debug!("tcp_write_half: {:?}", tcp_write_half);
-            log::debug!("got operation complete from mpsc queue, request_identifier: {}",operation_complete.request_identifier);
-            // todo wrzucić to do taska (niżej)
-            let mutex = Arc::try_unwrap(tcp_write_half).unwrap();
-            let mut tcp_write_half = mutex.into_inner();
-            match serialize_operation_complete_command(
-                &operation_complete,
-                &mut tcp_write_half,
-                &hmac_client_key_clone,
 
-            ).await {
-                Ok(()) => {
-                    debug!("sent message to client");
+            // send to queue
+            let tx = &workers_senders[worker_id];
+            match tx.send((command.clone(), client_addr)) {
+                Ok(_) => {
+                    log::debug!("successfully sent {:?} to worker: {}", command.clone(), worker_id);
                 }
                 Err(err) => {
-                    error!("error in serializing and sending message: {}", err);
+                    log::error!("error in rx.send: {}", err);
                 }
             }
-        }
+        }        
     });
 }
 
@@ -1013,7 +1025,6 @@ pub mod register_client_public {
                 &self.hmac_system_key,
             ).await {
                 Ok(_) => {
-                    log::debug!("sending to socket");
                     let addr = self.tcp_addrs.get(msg.target-1).unwrap();
                     let stream = TcpStream::connect(addr).await;
                     match stream {
@@ -1021,6 +1032,7 @@ pub mod register_client_public {
                             log::debug!("sending bytes of len = {}", writer.len());
                             match socket.write_all(writer.as_slice()).await {
                                 Ok(_) => {
+                                    log::warn!("{:?}", socket);
                                     log::warn!("successfully writing to socket: {}:{}", addr.0, addr.1);
                                 }
                                 Err(err) => {

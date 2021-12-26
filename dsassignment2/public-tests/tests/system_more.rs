@@ -40,6 +40,7 @@ async fn write_and_read_on_the_same_sector() {
         )
         .await;
     
+    //tokio::time::sleep(Duration::from_millis(2000)).await;
 
     log::debug!("after sending WRITE");
     config.read_response(&mut stream).await.unwrap();

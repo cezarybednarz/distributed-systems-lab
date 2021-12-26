@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::test]
-#[timeout(4000)]
+#[timeout(4000)] 
 async fn single_process_system_completes_operations() {
     env_logger::init();
     // given
@@ -48,10 +48,8 @@ async fn single_process_system_completes_operations() {
             data: SectorVec(vec![3; 4096]),
         },
     });
-
     // when
     send_cmd(&write_cmd, &mut stream, &hmac_client_key).await;
-
     // then
     const EXPECTED_RESPONSES_SIZE: usize = 48;
     let mut buf = [0_u8; EXPECTED_RESPONSES_SIZE];
@@ -59,7 +57,6 @@ async fn single_process_system_completes_operations() {
         .read_exact(&mut buf)
         .await
         .expect("Less data then expected");
-
     // asserts for write response
     assert_eq!(&buf[0..4], MAGIC_NUMBER.as_ref());
     assert_eq!(buf[7], 0x42);
