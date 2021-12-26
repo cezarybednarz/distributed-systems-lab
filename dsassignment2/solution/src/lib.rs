@@ -92,6 +92,7 @@ pub async fn run_register_process(config: Configuration) {
             };
             // todo może wrzucic to do środka taska (niżej)
             let (mut tcp_read_half, tcp_write_half) = tcp_stream.into_split();
+            log::warn!("tcp_write_half: {:?}", tcp_write_half);
             
             log::debug!("trying to deserialize command...");
             // deserialize command
@@ -161,6 +162,7 @@ pub async fn run_register_process(config: Configuration) {
                     return;
                 }
             };
+            log::debug!("tcp_write_half: {:?}", tcp_write_half);
             log::debug!("got operation complete from mpsc queue, request_identifier: {}",operation_complete.request_identifier);
             // todo wrzucić to do taska (niżej)
             let mutex = Arc::try_unwrap(tcp_write_half).unwrap();
@@ -968,7 +970,6 @@ pub mod transfer_public {
 
 
 pub mod register_client_public {
-    use log::error;
     use tokio::{net::TcpStream, io::AsyncWriteExt};
 
     use crate::{SystemRegisterCommand, RegisterCommand, serialize_register_command};
@@ -1020,7 +1021,7 @@ pub mod register_client_public {
                             log::debug!("sending bytes of len = {}", writer.len());
                             match socket.write_all(writer.as_slice()).await {
                                 Ok(_) => {
-                                    log::debug!("successfully writing to socket: {}:{}", addr.0, addr.1);
+                                    log::warn!("successfully writing to socket: {}:{}", addr.0, addr.1);
                                 }
                                 Err(err) => {
                                     log::error!("error while write_all to socket: {}", err);
@@ -1028,12 +1029,12 @@ pub mod register_client_public {
                             };
                         }
                         Err(err) => {
-                            error!("send(): couln't send to socket: {}", err);
+                            log::error!("send(): couln't send to socket: {}", err);
                         }
                     }
                 }
                 Err(err) => {
-                    error!("error during send() to target {} in serializing: {}", msg.target, err);
+                    log::error!("error during send() to target {} in serializing: {}", msg.target, err);
                 }
             }
         }
