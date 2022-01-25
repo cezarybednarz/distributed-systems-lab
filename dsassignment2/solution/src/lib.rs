@@ -4,7 +4,7 @@ mod utils;
 use std::{sync::Arc, collections::VecDeque};
 
 use log::{error, debug};
-use tokio::{sync::{Mutex, mpsc::{self, UnboundedReceiver, UnboundedSender}}, net::TcpListener};
+use tokio::net::TcpListener;
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
@@ -21,7 +21,6 @@ type HmacSha256 = Hmac<Sha256>;
 // todo odsmiecanie plikow tem przy zapisach (w trakcie recovery)
 // todo trzymanie wszystkiego w jednym folderze
 // todo jakies sprytniejsze trzymanie rid zeby sie miescilo w pamieci
-// todo nowa kolejka jeśli wysyłam do samego siebie
 // todo dodać '?' do awaitów i unwrapów / pousuwac panici
 // todo ReadBuf i WriteBuf jako wrapper do readhalf i writehalf
 
@@ -158,7 +157,7 @@ pub async fn run_register_process(config: Configuration) {
                 }
             };
             let (mut tcp_read_half, tcp_write_half) = tcp_stream.into_split();
-            log::warn!("tcp_write_half: {:?}", tcp_write_half);
+            log::debug!("tcp_write_half: {:?}", tcp_write_half);
             
             log::debug!("trying to deserialize command...");
             // deserialize command
@@ -258,7 +257,7 @@ pub mod atomic_register_public {
                 //     reading := TRUE;
                 //     trigger < sbeb, Broadcast | [READ_PROC, rid] >;
                 ClientRegisterCommandContent::Read => {
-                    log::info!("Read, request_identifier: {}", self.request_identifier);
+                    log::debug!("Read, request_identifier: {}", self.request_identifier);
                     self.rid += 1;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
                     self.readlist = HashMap::new();
@@ -289,14 +288,14 @@ pub mod atomic_register_public {
                 //     store(rid);
                 //     trigger < sbeb, Broadcast | [READ_PROC, rid] >;
                 ClientRegisterCommandContent::Write {data} => {
-                    log::info!("Write, request_identifier: {}", self.request_identifier);
+                    log::debug!("Write, request_identifier: {}", self.request_identifier);
                     self.rid += 1;
                     self.writeval = data;
                     self.acklist = HashSet::new();
                     self.readlist = HashMap::new();
                     self.writing = true;
                     self.metadata.put("rid", &self.rid.to_be_bytes()).await.unwrap();
-                    log::info!("Write, broadcasting ReadProc");
+                    log::debug!("Write, broadcasting ReadProc");
                     self.register_client.broadcast(
                         register_client_public::Broadcast {
                             cmd: Arc::new(
@@ -326,7 +325,7 @@ pub mod atomic_register_public {
                 // upon event < sbeb, Deliver | p [READ_PROC, r] > do
                 //     trigger < sl, Send | p, [VALUE, r, ts, wr, val] >;
                 SystemRegisterCommandContent::ReadProc => {
-                    log::info!("ReadProc: r = {}", r);
+                    log::debug!("ReadProc: r = {}", r);
                     let ts = self.ts.get(&sector_idx).unwrap();
                     let wr = self.wr.get(&sector_idx).unwrap();
                     let val = self.sectors_manager.read_data(sector_idx).await;
@@ -366,7 +365,7 @@ pub mod atomic_register_public {
                 //             store(ts, wr, val);
                 //             trigger < sbeb, Broadcast | [WRITE_PROC, rid, maxts + 1, rank(self), writeval] >;
                 SystemRegisterCommandContent::Value { timestamp, write_rank, sector_data } => {
-                    log::info!("Value");
+                    log::debug!("Value");
                     if r == self.rid && !self.write_phase {
                         self.readlist.insert(q, (timestamp, write_rank, sector_data));
                         if self.readlist.len() > self.processes_count / 2 {
@@ -434,7 +433,7 @@ pub mod atomic_register_public {
                 //         store(ts, wr, val);
                 //     trigger < sl, Send | p, [ACK, r] >;
                 SystemRegisterCommandContent::WriteProc { timestamp, write_rank, data_to_write } => {
-                    log::info!("WriteProc");
+                    log::debug!("WriteProc");
                     let ts = self.ts.get(&sector_idx).unwrap();
                     let wr = self.wr.get(&sector_idx).unwrap();
                     if (timestamp, write_rank) > (*ts, *wr) {
@@ -471,7 +470,7 @@ pub mod atomic_register_public {
                 //             writing := FALSE;
                 //             trigger < nnar, WriteReturn >;
                 SystemRegisterCommandContent::Ack => {
-                    log::info!("Ack");
+                    log::debug!("Ack");
                     if r == self.rid && self.write_phase {
                         self.acklist.insert(q);
                         if self.acklist.len() > self.processes_count / 2 && (self.reading || self.writing) {
@@ -942,13 +941,12 @@ pub mod transfer_public {
         return writer.write_all(&buf).await;
     }
 
-    // todo zmienić visibility tego
-    pub async fn serialize_operation_complete_command(
+    pub(crate) async fn serialize_operation_complete_command(
         cmd: &OperationComplete,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), Error> {
-        log::info!("starting serializing");
+        log::debug!("starting serializing");
         let mut buf = BytesMut::new();
         buf.put_slice(&MAGIC_NUMBER);
         buf.put_slice(&[0; 2]);
@@ -1060,8 +1058,8 @@ pub mod register_client_public {
                                 log::debug!("sending bytes of len = {}", writer.len());
                                 match socket.write_all(writer.as_slice()).await {
                                     Ok(_) => {
-                                        log::warn!("{:?}", socket);
-                                        log::warn!("successfully writing to socket: {}:{}", addr.0, addr.1);
+                                        log::debug!("{:?}", socket);
+                                        log::debug!("successfully writing to socket: {}:{}", addr.0, addr.1);
                                     }
                                     Err(err) => {
                                         log::error!("error while write_all to socket: {}", err);

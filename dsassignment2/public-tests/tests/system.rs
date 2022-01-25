@@ -67,7 +67,7 @@ async fn single_process_system_completes_operations() {
     assert!(hmac_tag_is_ok(&hmac_client_key, &buf));
 }
 
-/* 
+
 #[tokio::test]
 #[serial_test::serial]
 #[timeout(30000)]
@@ -201,7 +201,7 @@ async fn large_number_of_operations_execute_successfully() {
         }
     }
 }
-*/
+
 async fn send_cmd(register_cmd: &RegisterCommand, stream: &mut TcpStream, hmac_client_key: &[u8]) {
     let mut data = Vec::new();
     serialize_register_command(register_cmd, &mut data, hmac_client_key)
