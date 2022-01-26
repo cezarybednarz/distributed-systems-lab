@@ -1,3 +1,5 @@
+use std::{collections::{HashSet, VecDeque}};
+
 use executor::{Handler, ModuleRef, System};
 
 /// Marker trait indicating that a broadcast implementation provides
@@ -96,53 +98,12 @@ impl Operation {
     // Add any methods you need.
 }
 
-/// Process of the system.
-pub(crate) struct Process<const N: usize> {
-    /// Rank of the process.
-    rank: usize,
-    /// Reference to the broadcast module.
-    broadcast: Box<dyn ReliableBroadcastRef<N>>,
-    /// Reference to the process's client.
-    client: Box<dyn ClientRef>,
-
-    // Add any fields you need.
-}
-
-impl<const N: usize> Process<N> {
-    pub(crate) async fn new(
-        system: &mut System,
-        rank: usize,
-        broadcast: Box<dyn ReliableBroadcastRef<N>>,
-        client: Box<dyn ClientRef>,
-        // log
-        // Set // wiemy ktore wrzucic do kolejnej rundy i kiedy zaczac nowa runde
-        // kolejka od klientów
-        // kolejka od innych broadcastów z rundy 
-        // kolejka od innych broadcastów z kolejnej rundy
-    ) -> ModuleRef<Self> {
-        let self_ref = system
-            .register_module(Self {
-                rank,
-                broadcast,
-                client,
-                // Add any fields you need.
-            })
-            .await;
-        self_ref
-    }
-
-    // Add any methods you need.
-    // todo start_new_round()
-
-}
-
-async fn transform(op1: Operation, op2: Operation) -> Operation {
+pub(crate) async fn transform(op1: Operation, op2: Operation) -> Operation {
     let r1 = op1.process_rank;
     let r2 = op2.process_rank;
     match (op1.action.clone(), op2.action.clone()) {
-
         (Action::Nop, _) => {
-            return op2;
+            return op1; // NOP
         }
         (_, Action::Nop) => {
             return op1;
@@ -211,25 +172,143 @@ async fn transform(op1: Operation, op2: Operation) -> Operation {
     }
 }
 
+/// Process of the system.
+pub(crate) struct Process<const N: usize> {
+    /// Rank of the process.
+    rank: usize,
+    /// Reference to the broadcast module.
+    broadcast: Box<dyn ReliableBroadcastRef<N>>,
+    /// Reference to the process's client.
+    client: Box<dyn ClientRef>,
+
+    /// Process log
+    log: Vec<Operation>,
+    /// Processes that sent message in current round
+    current_round_set: HashSet<usize>,
+    /// Operations from processes from next round
+    next_round_ops: Vec<Operation>,
+    /// Queued messages from client 
+    client_ops: VecDeque<EditRequest>,
+}
+
+impl<const N: usize> Process<N> {
+    pub(crate) async fn new(
+        system: &mut System,
+        rank: usize,
+        broadcast: Box<dyn ReliableBroadcastRef<N>>,
+        client: Box<dyn ClientRef>,
+    ) -> ModuleRef<Self> {
+        let self_ref = system
+            .register_module(Self {
+                rank,
+                broadcast,
+                client,
+                log: Vec::new(),
+                current_round_set: HashSet::new(),
+                next_round_ops: Vec::new(),
+                client_ops: VecDeque::new(),
+            })
+            .await;
+        self_ref
+    }
+
+    pub(crate) async fn apply_transform_from_idx(&mut self, op1: Operation, start_idx: usize) -> Operation {
+        let mut op_ret = op1.clone();
+        for op2 in self.log[start_idx..].iter().cloned() {
+            op_ret = transform(op_ret, op2).await;
+        }
+        return op_ret;
+    }
+
+    pub(crate) async fn add_to_log_and_send_edit(&mut self, op: Operation, start_idx: usize) {
+        let op_transformed = self.apply_transform_from_idx(op, start_idx).await;
+        self.log.push(op_transformed.clone());
+        match op_transformed.action {
+            Action::Nop => {
+                // do not send nop to client
+            }
+            _ => {
+                self.client.send(Edit{ action: op_transformed.action}).await;
+            }
+        }
+    }
+
+    pub(crate) async fn first_client_edit_request(&mut self, request: EditRequest) {
+        // client message is first message 
+        let op = Operation { 
+            process_rank: N + 1, 
+            action: request.action.clone()
+        };
+        self.current_round_set.insert(self.rank);
+        self.add_to_log_and_send_edit(op, request.num_applied).await;
+        let op_broadcast = Operation {
+            process_rank: self.rank,
+            action: request.action.clone()
+        };
+        self.broadcast.send(op_broadcast).await;
+    }
+
+    pub(crate) async fn handle_op_from_process(&mut self, msg: Operation) {
+        self.add_to_log_and_send_edit(msg.clone(), self.log.len() - self.current_round_set.len()).await; // todo +/- 1
+        self.current_round_set.insert(msg.process_rank);
+        if self.current_round_set.len() == N {
+           self.start_new_round().await; 
+        }
+    }
+
+    pub(crate) async fn start_new_round(&mut self) {
+        self.current_round_set.clear();
+        if self.client_ops.is_empty() {
+            // NOP
+            self.current_round_set.insert(self.rank);
+            let nop_op = Operation {
+                process_rank: self.rank,
+                action: Action::Nop
+            };
+            self.add_to_log_and_send_edit(nop_op.clone(), self.log.len() - 1).await; // todo
+            self.broadcast.send(nop_op).await;
+        } else {
+            // client message is first message
+            let request = self.client_ops.pop_front();
+            self.first_client_edit_request(request.unwrap()).await;
+        }
+        let next_round_ops_vec = self.next_round_ops.clone();
+        self.next_round_ops = Vec::new();
+        for op in next_round_ops_vec.iter().cloned() {
+            let idx_start = self.log.len();
+            self.add_to_log_and_send_edit(op, idx_start).await;
+        }
+    }
+
+}
+
+
 #[async_trait::async_trait]
 impl<const N: usize> Handler<Operation> for Process<N> {
     async fn handle(&mut self, msg: Operation) {
-        todo!("Handle operation issued by other process.");
-        // dodaj na kolejke broadcastowa
-
-        // przelicz op1 transformem
-        
-        // jesli nowa runda to start_new_round (wykonaj te 3 ify od kacpra // z wiadomosci 
+        if self.current_round_set.contains(&msg.process_rank) {
+            // message from next round
+            self.next_round_ops.push(msg);
+        } else {
+            // message from current round
+            self.handle_op_from_process(msg).await;
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl<const N: usize> Handler<EditRequest> for Process<N> {
     async fn handle(&mut self, request: EditRequest) {
-        todo!("Handle edit request from the client.");
-        // dodaj na kolejke clientową
-        
-        // przelicz op1 transformrem i odeslij do kleinta Edit
-        // przeliczamy transform zlozenie log[request.num_applied..]
+        if self.current_round_set.contains(&self.rank) {
+            // already received message from client this round
+            self.client_ops.push_back(request);
+        } else {
+            if self.current_round_set.is_empty() {
+                // client message is first message
+                self.first_client_edit_request(request).await;
+            } else {
+                println!("error, nie powinna taka sytuacja wystapic");
+            } 
+        } 
     }
 }
