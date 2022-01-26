@@ -49,6 +49,7 @@ pub(crate) enum Action {
     /// A _do nothing_ operation. `Nop` cannot be issued by a client.
     /// `Nop` can only be issued by a process or result from a transformation.
     Nop,
+
 }
 
 impl Action {
@@ -113,6 +114,11 @@ impl<const N: usize> Process<N> {
         rank: usize,
         broadcast: Box<dyn ReliableBroadcastRef<N>>,
         client: Box<dyn ClientRef>,
+        // log
+        // Set // wiemy ktore wrzucic do kolejnej rundy i kiedy zaczac nowa runde
+        // kolejka od klientów
+        // kolejka od innych broadcastów z rundy 
+        // kolejka od innych broadcastów z kolejnej rundy
     ) -> ModuleRef<Self> {
         let self_ref = system
             .register_module(Self {
@@ -126,12 +132,94 @@ impl<const N: usize> Process<N> {
     }
 
     // Add any methods you need.
+    // todo start_new_round()
+
+}
+
+async fn transform(op1: Operation, op2: Operation) -> Operation {
+    let r1 = op1.process_rank;
+    let r2 = op2.process_rank;
+    match (op1.action.clone(), op2.action.clone()) {
+
+        (Action::Nop, _) => {
+            return op2;
+        }
+        (_, Action::Nop) => {
+            return op1;
+        }
+        (Action::Insert { idx: p1, ch: _ }, Action::Insert { idx: p2, ch: c2 }) => {
+            if p1 < p2 {
+                return op1;    
+            }
+            if p1 == p2 && r1 < r2 {
+                return op1;
+            } else {
+                return Operation {
+                    action: Action::Insert {
+                        idx: p1,
+                        ch: c2,
+                    },
+                    process_rank: r1,
+                }
+            }
+        }
+        (Action::Delete { idx: p1 }, Action::Delete { idx: p2 }) => {
+            if p1 < p2 {
+                return op1;
+            }
+            if p1 == p2 {
+                return Operation {
+                    action: Action::Nop,
+                    process_rank: r1
+                };
+            } else {
+                return Operation {
+                    action: Action::Delete {
+                        idx: p1 - 1
+                    },
+                    process_rank: r1
+                }
+            }
+        }
+        (Action::Insert { idx: p1, ch: c1 }, Action::Delete { idx: p2 }) => {
+            if p1 <= p2 {
+                return op1;
+            }
+            else {
+                return Operation {
+                    action: Action::Insert {
+                        idx: p1 - 1,
+                        ch: c1
+                    },
+                    process_rank: r1
+                }
+            }
+        }
+        (Action::Delete { idx: p1 }, Action::Insert { idx: p2, ch: _ }) => {
+            if p1 < p2 {
+                return op1;
+            }
+            else {
+                return Operation {
+                    action: Action::Delete {
+                        idx: p1 + 1
+                    },
+                    process_rank: r1
+                }
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl<const N: usize> Handler<Operation> for Process<N> {
     async fn handle(&mut self, msg: Operation) {
         todo!("Handle operation issued by other process.");
+        // dodaj na kolejke broadcastowa
+
+        // przelicz op1 transformem
+        
+        // jesli nowa runda to start_new_round (wykonaj te 3 ify od kacpra // z wiadomosci 
     }
 }
 
@@ -139,5 +227,9 @@ impl<const N: usize> Handler<Operation> for Process<N> {
 impl<const N: usize> Handler<EditRequest> for Process<N> {
     async fn handle(&mut self, request: EditRequest) {
         todo!("Handle edit request from the client.");
+        // dodaj na kolejke clientową
+        
+        // przelicz op1 transformrem i odeslij do kleinta Edit
+        // przeliczamy transform zlozenie log[request.num_applied..]
     }
 }
