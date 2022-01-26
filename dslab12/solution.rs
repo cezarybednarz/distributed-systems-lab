@@ -101,6 +101,7 @@ impl Operation {
 pub(crate) async fn transform(op1: Operation, op2: Operation) -> Operation {
     let r1 = op1.process_rank;
     let r2 = op2.process_rank;
+
     match (op1.action.clone(), op2.action.clone()) {
         (Action::Nop, _) => {
             return op1; // NOP
@@ -108,7 +109,7 @@ pub(crate) async fn transform(op1: Operation, op2: Operation) -> Operation {
         (_, Action::Nop) => {
             return op1;
         }
-        (Action::Insert { idx: p1, ch: _ }, Action::Insert { idx: p2, ch: c2 }) => {
+        (Action::Insert { idx: p1, ch: c1 }, Action::Insert { idx: p2, ch: _ }) => {
             if p1 < p2 {
                 return op1;    
             }
@@ -117,8 +118,8 @@ pub(crate) async fn transform(op1: Operation, op2: Operation) -> Operation {
             } else {
                 return Operation {
                     action: Action::Insert {
-                        idx: p1,
-                        ch: c2,
+                        idx: p1 + 1,
+                        ch: c1,
                     },
                     process_rank: r1,
                 }
@@ -220,17 +221,14 @@ impl<const N: usize> Process<N> {
         return op_ret;
     }
 
-    pub(crate) async fn add_to_log_and_send_edit(&mut self, op: Operation, start_idx: usize) {
-        let op_transformed = self.apply_transform_from_idx(op, start_idx).await;
-        self.log.push(op_transformed.clone());
-        match op_transformed.action {
-            Action::Nop => {
-                // do not send nop to client
-            }
-            _ => {
-                self.client.send(Edit{ action: op_transformed.action}).await;
-            }
+    pub(crate) async fn add_to_log_and_send_edit(&mut self, op: Operation, start_idx: usize, is_self: bool) -> Operation {
+        let mut op_transformed = self.apply_transform_from_idx(op, start_idx).await;
+        if is_self {
+            op_transformed.process_rank = self.rank;
         }
+        self.log.push(op_transformed.clone());
+        self.client.send(Edit{ action: op_transformed.clone().action}).await;
+        return op_transformed;
     }
 
     pub(crate) async fn first_client_edit_request(&mut self, request: EditRequest) {
@@ -240,52 +238,50 @@ impl<const N: usize> Process<N> {
             action: request.action.clone()
         };
         self.current_round_set.insert(self.rank);
-        self.add_to_log_and_send_edit(op, request.num_applied).await;
-        let op_broadcast = Operation {
-            process_rank: self.rank,
-            action: request.action.clone()
-        };
-        self.broadcast.send(op_broadcast).await;
+        let mut op_transformed = self.add_to_log_and_send_edit(op, request.num_applied, true).await;
+        op_transformed.process_rank = self.rank;
+        self.broadcast.send(op_transformed).await;
     }
 
     pub(crate) async fn handle_op_from_process(&mut self, msg: Operation) {
-        self.add_to_log_and_send_edit(msg.clone(), self.log.len() - self.current_round_set.len()).await; // todo +/- 1
-        self.current_round_set.insert(msg.process_rank);
-        if self.current_round_set.len() == N {
-           self.start_new_round().await; 
-        }
-    }
-
-    pub(crate) async fn start_new_round(&mut self) {
-        self.current_round_set.clear();
-        if self.client_ops.is_empty() {
+        if !self.current_round_set.contains(&self.rank) {
             // NOP
             self.current_round_set.insert(self.rank);
             let nop_op = Operation {
                 process_rank: self.rank,
                 action: Action::Nop
             };
-            self.add_to_log_and_send_edit(nop_op.clone(), self.log.len() - 1).await; // todo
+            self.add_to_log_and_send_edit(nop_op.clone(), self.log.len(), true).await; // todo
             self.broadcast.send(nop_op).await;
-        } else {
+        }
+        self.add_to_log_and_send_edit(msg.clone(), self.log.len() - self.current_round_set.len(), false).await; // todo +/- 1
+        self.current_round_set.insert(msg.process_rank);
+    }
+
+    pub(crate) async fn start_new_round(&mut self) {
+        self.current_round_set.clear();
+        if !self.client_ops.is_empty() {
             // client message is first message
             let request = self.client_ops.pop_front();
             self.first_client_edit_request(request.unwrap()).await;
         }
+        // recover messages from next round
         let next_round_ops_vec = self.next_round_ops.clone();
         self.next_round_ops = Vec::new();
         for op in next_round_ops_vec.iter().cloned() {
-            let idx_start = self.log.len();
-            self.add_to_log_and_send_edit(op, idx_start).await;
+            self.handle_op_from_process(op).await;
         }
     }
 
 }
 
-
 #[async_trait::async_trait]
 impl<const N: usize> Handler<Operation> for Process<N> {
     async fn handle(&mut self, msg: Operation) {
+        if self.current_round_set.len() == N {
+            self.start_new_round().await; 
+        } 
+
         if self.current_round_set.contains(&msg.process_rank) {
             // message from next round
             self.next_round_ops.push(msg);
@@ -293,12 +289,18 @@ impl<const N: usize> Handler<Operation> for Process<N> {
             // message from current round
             self.handle_op_from_process(msg).await;
         }
+        if self.current_round_set.len() == N {
+            self.start_new_round().await; 
+        } 
     }
 }
 
 #[async_trait::async_trait]
 impl<const N: usize> Handler<EditRequest> for Process<N> {
     async fn handle(&mut self, request: EditRequest) {
+        if self.current_round_set.len() == N {
+            self.start_new_round().await; 
+        } 
         if self.current_round_set.contains(&self.rank) {
             // already received message from client this round
             self.client_ops.push_back(request);
@@ -307,8 +309,11 @@ impl<const N: usize> Handler<EditRequest> for Process<N> {
                 // client message is first message
                 self.first_client_edit_request(request).await;
             } else {
-                println!("error, nie powinna taka sytuacja wystapic");
+                // impossible
             } 
+        }
+        if self.current_round_set.len() == N {
+            self.start_new_round().await; 
         } 
     }
 }
