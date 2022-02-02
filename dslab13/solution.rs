@@ -337,6 +337,7 @@ impl ChordNode {
                 power *= 2;
             }
         }
+        
     }
 
     /// Given a header of a Chord message, decides
@@ -346,6 +347,11 @@ impl ChordNode {
     pub(crate) fn find_next_routing_hop(&self, hdr: &ChordMessageHeader) -> ChordRoutingOutcome {
         let r = self.rs.succ_table.len();
         let b = self.rs.finger_table.len();
+        // ! debug
+        // println!("\nr = {} b = {} self.id = {}, hdr.dst_id = {}", r, b, self.id, hdr.dst_id);
+        // println!("finger_table {:?}", self.rs.finger_table);
+        // println!("succ_table {:?}", self.rs.succ_table);
+        // println!("pred_table {:?}", self.rs.pred_table);
         // accept message if did in our range
         if self.rs.pred_table[0] == None ||
            chord_id_in_range(
@@ -353,6 +359,7 @@ impl ChordNode {
                &hdr.dst_id, 
                chord_id_advance_by(b, &self.rs.pred_table[0].unwrap().id, &1)..=(self.id)
         ) {
+            println!(" !!! ACCEPT {} !!!", self.id);
             return ChordRoutingOutcome::Accept;
         }
         // check successors
@@ -361,8 +368,8 @@ impl ChordNode {
             &hdr.dst_id,
             chord_id_advance_by(b, &self.id, &1)..=(self.rs.succ_table[0].unwrap().id)
         ) {
-            println!("accept {}", self.rs.pred_table[0].unwrap().id);
-            return ChordRoutingOutcome::Forward(self.rs.pred_table[0].unwrap().addr);
+            println!(" >> forward {}", self.rs.succ_table[0].unwrap().id);
+            return ChordRoutingOutcome::Forward(self.rs.succ_table[0].unwrap().addr);
         }
         for i in 0..(r-1) {
             let begin_range = chord_id_advance_by(b, &self.rs.succ_table[i].unwrap().id, &1);
@@ -372,20 +379,25 @@ impl ChordNode {
                 &hdr.dst_id, 
                 begin_range..=end_range_inclusive
             ) {
-                println!("forward {}", self.rs.succ_table[i+1].unwrap().id);
+                println!(" >> forward {}", self.rs.succ_table[i+1].unwrap().id);
                 return ChordRoutingOutcome::Forward(self.rs.succ_table[i+1].unwrap().addr);
             }
         }
         // check preds
+        if hdr.dst_id == self.rs.pred_table[r-1].unwrap().id {
+            println!(" >> forward {}", self.rs.pred_table[r-1].unwrap().id);
+            return ChordRoutingOutcome::Forward(self.rs.pred_table[r-1].unwrap().addr);
+        }
         for i in 0..(r-1) {
             let begin_range = chord_id_advance_by(b, &self.rs.pred_table[i+1].unwrap().id, &1);
             let end_range_inclusive = (self.rs.succ_table[i]).unwrap().id;
+            println!("{}..={}", begin_range, end_range_inclusive);
             if chord_id_in_range(
                 b, 
                 &hdr.dst_id, 
                 begin_range..=end_range_inclusive
             ) {
-                println!("forward {}", self.rs.pred_table[i].unwrap().id);
+                println!(" >> forward {}", self.rs.pred_table[i].unwrap().id);
                 return ChordRoutingOutcome::Forward(self.rs.pred_table[i].unwrap().addr);
             }
         }
@@ -400,6 +412,7 @@ impl ChordNode {
                 best_id = i;
             }
         }
+        println!(" >> forward finger {}", self.rs.finger_table[best_id].unwrap().id);
         return ChordRoutingOutcome::Forward(self.rs.finger_table[best_id].unwrap().addr);
     }
 
