@@ -257,8 +257,107 @@ impl ChordNode {
         //        find the earlier chord_id_* functions useful.
         //        In essence, this function should only change
         //        self.rs, utilizing self.id and all_nodes.
+        
+        // system: &mut System,
+        // net_ref: ModuleRef<Internet>,
+        // ring_bits: usize, // B
+        // ring_redundancy   // R
+        //     /// The node's identifier on the ring.
+        // id: ChordId,
+        // /// The node's transport-layer address.
+        // addr: ChordAddr,
+        // /// The node's routing state.
+        // rs: ChordRoutingState,
+        // /// The interface to the Internet (no need to use directly).
+        // net_ref: ModuleRef<Internet>,
+        // /// A reference to self (no need to use directly).
+        // self_ref: Arc<Mutex<Option<ModuleRef<ChordNode>>>>,
+        let n = all_nodes.len();
+        let r = self.rs.succ_table.len();
+        let b = self.rs.finger_table.len();
+        println!("n = {} r = {} b = {}", n, r, b);
+        let mut chord_nodes: Vec<ChordId> = all_nodes.keys().cloned().collect();
+        // double the ChordId vec in order to make computations easier
+        chord_nodes = chord_nodes.iter().cloned().chain(chord_nodes.iter().cloned()).collect::<Vec<ChordId>>();
+        // find idx of self.id in chard_nodes
+        let mut idx: usize = 0;
+        for i in 0..n {
+            if chord_nodes[i] == self.id {
+                idx = i;
+                break;
+            }
+        }
+        println!("idx = {}", idx);
+        // fill succ_table
+        let mut succ_idx = idx;
+        for i in 0..r {
+            succ_idx += 1;
+            if succ_idx == n { succ_idx = 0; }
+            if succ_idx == idx {
+                self.rs.succ_table[i] = None;
+            }
+            else {
+                self.rs.succ_table[i] = Some(ChordLinkId {
+                    id: chord_nodes[succ_idx],
+                    addr: *all_nodes.get(&chord_nodes[succ_idx]).unwrap()
+                });
+            }
+        }
+        // fill pred table
+        let mut pred_idx = idx;
+        for i in 0..r {
+            if pred_idx == 0 { 
+                pred_idx = n-1;
+            } else {
+                pred_idx -= 1;
+            }
+            if pred_idx == idx {
+                self.rs.pred_table[i] = None;
+            }
+            else {
+                self.rs.pred_table[i] = Some(ChordLinkId {
+                    id: chord_nodes[pred_idx],
+                    addr: *all_nodes.get(&chord_nodes[pred_idx]).unwrap()
+                });
+            }
+        }
+        // fill finger table
+        let mut power: ChordId = 1;
+        let mut next_idx = idx + 1;
+        for i in 0..b {
+            let lower_bound = chord_id_advance_by(b, &chord_nodes[idx], &power);
+            let upper_bound = chord_id_advance_by(b, &lower_bound, &power);
+            while next_idx < n+n &&
+                  power > chord_id_distance(b, &chord_nodes[idx], &chord_nodes[next_idx])  
+            {
+                next_idx += 1;
+            }
+            if next_idx == n+n {
+                self.rs.finger_table[i] = None;
+            } else if chord_id_in_range(b, &chord_nodes[next_idx], lower_bound..upper_bound) {
+                let normalised_idx = if next_idx >= n { 
+                    next_idx-n
+                } else { 
+                    next_idx
+                };
+                self.rs.finger_table[i] = Some(ChordLinkId {
+                    id: chord_nodes[normalised_idx],
+                    addr: *all_nodes.get(&chord_nodes[normalised_idx]).unwrap()
+                });
+            } else {
+                self.rs.finger_table[i] = None;
+            }
+            if i+1 != n {
+                power *= 2;
+            }
+        }
 
-        unimplemented!();
+        // println!("self_id {}", self.id);
+        // println!("all_nodes {:?}", all_nodes);
+        // println!("succ {:?}", self.rs.succ_table);
+        // println!("pred {:?}", self.rs.pred_table);
+        // println!("finger {:?}", self.rs.finger_table);
+        
     }
 
     /// Given a header of a Chord message, decides
@@ -271,8 +370,8 @@ impl ChordNode {
         //        find the earlier chord_id_* functions useful.
         //        In essence, this function requires only
         //        self.rs, self.id, and hdr.dst_id.
-
-        unimplemented!();
+        
+        return ChordRoutingOutcome::Forward(12341234);
     }
 
     async fn recv_chord_msg(&mut self, msg: ChordMessage, _from_addr: &ChordAddr) {
