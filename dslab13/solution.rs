@@ -258,20 +258,6 @@ impl ChordNode {
         //        In essence, this function should only change
         //        self.rs, utilizing self.id and all_nodes.
         
-        // system: &mut System,
-        // net_ref: ModuleRef<Internet>,
-        // ring_bits: usize, // B
-        // ring_redundancy   // R
-        //     /// The node's identifier on the ring.
-        // id: ChordId,
-        // /// The node's transport-layer address.
-        // addr: ChordAddr,
-        // /// The node's routing state.
-        // rs: ChordRoutingState,
-        // /// The interface to the Internet (no need to use directly).
-        // net_ref: ModuleRef<Internet>,
-        // /// A reference to self (no need to use directly).
-        // self_ref: Arc<Mutex<Option<ModuleRef<ChordNode>>>>,
         let n = all_nodes.len();
         let r = self.rs.succ_table.len();
         let b = self.rs.finger_table.len();
@@ -358,13 +344,63 @@ impl ChordNode {
     /// perform, that is, whether to accept the
     /// message or forward it to another node.
     pub(crate) fn find_next_routing_hop(&self, hdr: &ChordMessageHeader) -> ChordRoutingOutcome {
-
-        // FIXME: Implement this function. To this end, you may
-        //        find the earlier chord_id_* functions useful.
-        //        In essence, this function requires only
-        //        self.rs, self.id, and hdr.dst_id.
-        
-        return ChordRoutingOutcome::Forward(12341234);
+        let r = self.rs.succ_table.len();
+        let b = self.rs.finger_table.len();
+        // accept message if did in our range
+        if self.rs.pred_table[0] == None ||
+           chord_id_in_range(
+               b, 
+               &hdr.dst_id, 
+               chord_id_advance_by(b, &self.rs.pred_table[0].unwrap().id, &1)..=(self.id)
+        ) {
+            return ChordRoutingOutcome::Accept;
+        }
+        // check successors
+        if chord_id_in_range(
+            b, 
+            &hdr.dst_id,
+            chord_id_advance_by(b, &self.id, &1)..=(self.rs.succ_table[0].unwrap().id)
+        ) {
+            println!("accept {}", self.rs.pred_table[0].unwrap().id);
+            return ChordRoutingOutcome::Forward(self.rs.pred_table[0].unwrap().addr);
+        }
+        for i in 0..(r-1) {
+            let begin_range = chord_id_advance_by(b, &self.rs.succ_table[i].unwrap().id, &1);
+            let end_range_inclusive = (self.rs.succ_table[i+1]).unwrap().id;
+            if chord_id_in_range(
+                b, 
+                &hdr.dst_id, 
+                begin_range..=end_range_inclusive
+            ) {
+                println!("forward {}", self.rs.succ_table[i+1].unwrap().id);
+                return ChordRoutingOutcome::Forward(self.rs.succ_table[i+1].unwrap().addr);
+            }
+        }
+        // check preds
+        for i in 0..(r-1) {
+            let begin_range = chord_id_advance_by(b, &self.rs.pred_table[i+1].unwrap().id, &1);
+            let end_range_inclusive = (self.rs.succ_table[i]).unwrap().id;
+            if chord_id_in_range(
+                b, 
+                &hdr.dst_id, 
+                begin_range..=end_range_inclusive
+            ) {
+                println!("forward {}", self.rs.pred_table[i].unwrap().id);
+                return ChordRoutingOutcome::Forward(self.rs.pred_table[i].unwrap().addr);
+            }
+        }
+        // make largest possible jump using finger table
+        let mut best_id = 0;
+        let distance_to_hdr = chord_id_distance(b, &self.id, &hdr.dst_id);
+        for i in 0..b {
+            if self.rs.finger_table[i] == None {
+                continue;
+            }
+            if chord_id_distance(b, &self.id, &self.rs.finger_table[i].unwrap().id) <= distance_to_hdr {
+                best_id = i;
+            }
+        }
+        return ChordRoutingOutcome::Forward(self.rs.finger_table[best_id].unwrap().addr);
     }
 
     async fn recv_chord_msg(&mut self, msg: ChordMessage, _from_addr: &ChordAddr) {
