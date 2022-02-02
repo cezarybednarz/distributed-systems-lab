@@ -112,6 +112,192 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[timeout(2000)]
+    async fn test_links_from_diagram_with_redundancy_two() {
+        env_logger::init();
+
+        // Given:
+        let cfg = ChordSystemConfig::new(
+            5,
+            2,
+            array::IntoIter::new([
+                (0, 100),
+                (3, 101),
+                (8, 102),
+                (10, 103),
+                (13, 104),
+                (17, 105),
+                (19, 106),
+                (20, 107),
+                (27, 108),
+            ]),
+        );
+        let mut system = System::new().await;
+        let (net_ref, node_refs) = cfg.setup_system(&mut system).await;
+
+        // When:
+        wire_all_chord_nodes_given_global_info_from_oracle(node_refs.values(), &cfg.all_nodes)
+            .await;
+
+        // Then:
+        check_chord_node_routing_state(
+            &0,
+            &node_refs,
+            build_chord_node_routing_state(
+                &cfg,
+                // successors
+                [3, 8],
+                // predecessors
+                [27, 20],
+                // fingers at subsequent levels
+                [
+                    (1, 3),
+                    (3, 8),
+                    (4, 17),
+                ],
+            ),
+        )
+            .await;
+
+        check_chord_node_routing_state(
+            &13,
+            &node_refs,
+            build_chord_node_routing_state(
+                &cfg,
+                // successors
+                [17, 19],
+                // predecessors
+                [10, 8],
+                // fingers at subsequent levels
+                [
+                    (2, 17),
+                    (3, 27),
+                    (4, 0),
+                ],
+            ),
+        )
+            .await;
+
+        check_chord_node_routing_state(
+            &19,
+            &node_refs,
+            build_chord_node_routing_state(
+                &cfg,
+                // successors
+                [20, 27],
+                // predecessors
+                [17, 13],
+                // fingers at subsequent levels
+                [
+                    (0, 20),
+                    (3, 27),
+                    (4, 3),
+                ],
+            ),
+        )
+            .await;
+
+        check_chord_routing_hops(&cfg, &net_ref, &10, &12, [10, 13]).await;
+        // check_chord_routing_hops(&cfg, &net_ref, &0, &25, [0, 17, 19, 20, 27]).await;
+        // check_chord_routing_hops(&cfg, &net_ref, &8, &3, [8, 3]).await;
+
+        system.shutdown().await;
+    }
+
+
+    #[tokio::test]
+    #[timeout(2000)]
+    async fn test_links_from_diagram() {
+
+        // Given:
+        let cfg = ChordSystemConfig::new(
+            5,
+            1,
+            array::IntoIter::new([
+                (0, 100),
+                (3, 101),
+                (8, 102),
+                (10, 103),
+                (13, 104),
+                (17, 105),
+                (19, 106),
+                (20, 107),
+                (27, 108),
+            ]),
+        );
+        let mut system = System::new().await;
+        let (net_ref, node_refs) = cfg.setup_system(&mut system).await;
+
+        // When:
+        wire_all_chord_nodes_given_global_info_from_oracle(node_refs.values(), &cfg.all_nodes)
+            .await;
+
+        // Then:
+        check_chord_node_routing_state(
+            &0,
+            &node_refs,
+            build_chord_node_routing_state(
+                &cfg,
+                // successors
+                [3],
+                // predecessors
+                [27],
+                // fingers at subsequent levels
+                [
+                    (1, 3),
+                    (3, 8),
+                    (4, 17),
+                ],
+            ),
+        )
+            .await;
+
+        check_chord_node_routing_state(
+            &13,
+            &node_refs,
+            build_chord_node_routing_state(
+                &cfg,
+                // successors
+                [17],
+                // predecessors
+                [10],
+                // fingers at subsequent levels
+                [
+                    (2, 17),
+                    (3, 27),
+                    (4, 0),
+                ],
+            ),
+        )
+            .await;
+
+        check_chord_node_routing_state(
+            &19,
+            &node_refs,
+            build_chord_node_routing_state(
+                &cfg,
+                // successors
+                [20],
+                // predecessors
+                [17],
+                // fingers at subsequent levels
+                [
+                    (0, 20),
+                    (3, 27),
+                    (4, 3),
+                ],
+            ),
+        )
+            .await;
+
+        check_chord_routing_hops(&cfg, &net_ref, &10, &12, [10, 13]).await;
+        check_chord_routing_hops(&cfg, &net_ref, &0, &25, [0, 17, 19, 20, 27]).await;
+        check_chord_routing_hops(&cfg, &net_ref, &8, &3, [8, 3]).await;
+
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[timeout(2000)]
     async fn routing_in_singleton_max_bit_ring_should_only_node_accept_everything() {
         // Given:
         let cfg = ChordSystemConfig::new(
