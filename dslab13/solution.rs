@@ -351,13 +351,6 @@ impl ChordNode {
                 power *= 2;
             }
         }
-
-        // println!("self_id {}", self.id);
-        // println!("all_nodes {:?}", all_nodes);
-        // println!("succ {:?}", self.rs.succ_table);
-        // println!("pred {:?}", self.rs.pred_table);
-        // println!("finger {:?}", self.rs.finger_table);
-        
     }
 
     /// Given a header of a Chord message, decides
